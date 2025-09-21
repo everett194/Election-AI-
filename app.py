@@ -1,73 +1,67 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from io import StringIO
+import geopandas as gpd
+import pydeck as pdk
 
-# --- Step 1: Hardcode the polling data into the app ---
-csv_data = """date,party,percentage
-2017-06-05,Conservative,42
-2017-06-05,Labour,35
-2017-06-05,Liberal Democrats,10
-2017-06-05,UKIP,5
-2017-06-05,Green,2
-2017-06-06,Conservative,44
-2017-06-06,Labour,36
-2017-06-06,Liberal Democrats,7
-2017-06-06,UKIP,4
-2017-06-06,Green,2
-2017-06-07,Conservative,46
-2017-06-07,Labour,33
-2017-06-07,Liberal Democrats,8
-2017-06-07,UKIP,5
-2017-06-07,Green,3
-2017-06-08,Conservative,44
-2017-06-08,Labour,36
-2017-06-08,Liberal Democrats,7
-2017-06-08,UKIP,4
-2017-06-08,Green,2
+# --- Load subset geojson ---
+@st.cache
+def load_geo():
+    # Replace "aus_divisions_2022_subset.geojson" with your file of subset boundaries
+    return gpd.read_file("aus_divisions_2022_subset.geojson")
+
+@st.cache
+def load_results():
+    # Replace or upload this file to your repo
+    from io import StringIO
+    csv = """electorate,Labor,Coalition,Greens,Independent
+Sydney,50,30,15,5
+Melbourne,40,20,30,10
+Brisbane,48,32,12,8
+Perth,38,40,15,7
+Adelaide,42,33,15,10
 """
+    return pd.read_csv(StringIO(csv))
 
-# Load the CSV data into a dataframe
-df = pd.read_csv(StringIO(csv_data))
+def predict_winner(row, swings, parties):
+    shares = {p: row[p] for p in parties}
+    for p in parties:
+        if p in swings:
+            shares[p] = max(0, shares[p] + swings[p])
+    return max(shares.items(), key=lambda x: x[1])[0]
 
-# --- Step 2: Define the prediction function ---
-def predict(adjustments=None):
-    latest = df.groupby("party")["percentage"].mean()
-    if adjustments:
-        for party, adj in adjustments.items():
-            if party in latest:
-                latest[party] = max(0, latest[party] + adj)
+st.title("Australia 2022 Seat Predictor (Demo Subset)")
+parties = ["Labor", "Coalition", "Greens", "Independent"]
+st.sidebar.header("Adjust National Swing (%)")
+swings = {}
+for p in parties:
+    swings[p] = st.sidebar.slider(f"{p} swing", -20, 20, 0)
 
-    results = {}
-    for party, avg in latest.items():
-        sims = np.random.normal(loc=avg, scale=2, size=10000)
-        results[party] = (sims > 50).mean()
-    return latest, results
+geo = load_geo()
+results = load_results()
+results["predicted_winner"] = results.apply(lambda r: predict_winner(r, swings, parties), axis=1)
+merged = geo.merge(results, left_on="electorate", right_on="electorate", how="left")
 
-# --- Step 3: Build the Streamlit app ---
-st.title("2017 UK Election AI Modeller")
-st.write("Simple demo based on polling averages with user adjustments")
-
-st.header("Adjust Party Support")
-con_adj = st.slider("Conservative adjustment (%)", -10, 10, 0)
-lab_adj = st.slider("Labour adjustment (%)", -10, 10, 0)
-lib_adj = st.slider("Liberal Democrat adjustment (%)", -10, 10, 0)
-ukip_adj = st.slider("UKIP adjustment (%)", -10, 10, 0)
-green_adj = st.slider("Green adjustment (%)", -10, 10, 0)
-
-adjustments = {
-    "Conservative": con_adj,
-    "Labour": lab_adj,
-    "Liberal Democrats": lib_adj,
-    "UKIP": ukip_adj,
-    "Green": green_adj
+party_colors = {
+    "Labor":"#E53210",
+    "Coalition":"#0055A4",
+    "Greens":"#00A550",
+    "Independent":"#666666"
 }
+merged["color"] = merged["predicted_winner"].map(party_colors).fillna("#CCCCCC")
 
-latest, results = predict(adjustments=adjustments)
+st.subheader("Predicted Seats")
+st.bar_chart(results["predicted_winner"].value_counts())
 
-st.subheader("Adjusted Polling Averages")
-st.bar_chart(latest)
-
-st.subheader("Estimated Win Probabilities (simplified)")
-for party, prob in results.items():
-    st.write(f"{party}: {prob*100:.1f}% chance of >50% support")
+st.subheader("Map")
+layer = pdk.Layer(
+    "GeoJsonLayer",
+    data=merged.__geo_interface__,
+    get_fill_color="color",
+    pickable=True,
+    auto_highlight=True,
+    get_line_color=[255,255,255]
+)
+view = pdk.ViewState(latitude=-33.5, longitude=151, zoom=5)
+deck = pdk.Deck(layers=[layer], initial_view_state=view, tooltip={"text":"{electorate}: {predicted_winner}"})
+st.pydeck_chart(deck)
