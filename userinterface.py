@@ -3,12 +3,7 @@ userinterface.py
 
 Standalone Streamlit front end that collects a US zip code from the user.
 
-This is a stub: it validates and echoes back the zip code but does not yet
-look anything up. There is no zip-code-keyed dataset in this repo yet
-(app.py's election data is keyed by Australian electorate name, e.g.
-"Sydney", "Melbourne" -- not by zip/postcode). Once a real zip-code-to-
-district/electorate data source is chosen, wire it in at the marked spot
-below.
+This is a stub: it validates and echoes back the zip code.
 
 Run with:
     streamlit run userinterface.py
