@@ -96,9 +96,8 @@ def main() -> None:
                 expanded=True,
             ) as status:
                 st.write(
-                    "This runs several real web searches per race and commonly takes "
-                    "1-3 minutes -- it is still working even if nothing appears to "
-                    "change for a while."
+                    "Running three scoped searches (mayoral, county, U.S. House) in "
+                    "parallel. This usually finishes in under a minute."
                 )
                 try:
                     st.session_state.lookup_cache[zipcode] = find_local_elections(zipcode)

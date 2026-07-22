@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import re
@@ -109,25 +110,30 @@ def parse_lookup_response(zipcode: str, raw_text: str) -> LookupResult:
 
 MODEL = "claude-opus-4-8"
 
-PROMPT_TEMPLATE = """You are researching upcoming local elections for a US zip code, \
-for a nonpartisan voter-education tool. Prioritize official sources (state/county/city \
-election authority websites, house.gov) before campaign sites or news.
+OFFICES: tuple[str, ...] = ("mayor", "county", "us_house")
+
+OFFICE_DESCRIPTIONS = {
+    "mayor": "the next mayoral election for the city containing this zip code (if the "
+    "city has an elected mayor)",
+    "county": "the next county-level election for the county containing this zip code",
+    "us_house": "the next U.S. House of Representatives election for the congressional "
+    "district containing this zip code",
+}
+
+SINGLE_OFFICE_PROMPT_TEMPLATE = """You are researching an upcoming local election for a US \
+zip code, for a nonpartisan voter-education tool. Prioritize official sources (state/county/ \
+city election authority websites, house.gov) before campaign sites or news. Work \
+efficiently -- a handful of well-chosen searches is enough; this does not need to be \
+exhaustive.
 
 Zip code: {zipcode}
 
-Find, limited to these three race types:
-1. The next mayoral election for the city containing this zip code (if the city has an \
-elected mayor).
-2. The next county-level election for the county containing this zip code.
-3. The next U.S. House of Representatives election for the congressional district \
-containing this zip code.
-
-For each race type, find whichever election is soonest -- primary or general. If no \
-upcoming race of that type exists, or the jurisdiction doesn't have one (e.g. no elected \
-mayor), include it in your output with an empty candidates list and a note explaining why.
+Find {office_description}, whichever is soonest -- primary or general. If no upcoming \
+race of this type exists, or the jurisdiction doesn't have one (e.g. no elected mayor), \
+say so with a note explaining why and an empty candidates list.
 
 For each candidate, list their name, party (if known), incumbent status (if known), and \
-2-4 short bullet points on their stated positions or priorities, each with a confidence \
+1-3 short bullet points on their stated positions or priorities, each with a confidence \
 level ("high", "medium", or "low") and the source URL(s) it came from. Only include a \
 position if you found a real source for it -- never invent or infer one. If you found no \
 documented positions for a candidate, give them an empty positions list.
@@ -138,7 +144,7 @@ exactly this shape:
 {{
   "races": [
     {{
-      "office": "mayor" | "county" | "us_house",
+      "office": "{office}",
       "jurisdiction_name": "<string>",
       "election_date": "<YYYY-MM-DD or null>",
       "election_type": "primary" | "general" | null,
@@ -163,6 +169,31 @@ exactly this shape:
 """
 
 
+def _search_one_office(zipcode: str, office: str, client: "anthropic.Anthropic") -> Race:
+    prompt = SINGLE_OFFICE_PROMPT_TEMPLATE.format(
+        zipcode=zipcode, office=office, office_description=OFFICE_DESCRIPTIONS[office]
+    )
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=3000,
+        tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 5}],
+        output_config={"effort": "low"},
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    if response.stop_reason == "refusal":
+        raise RuntimeError(f"The search for the {office} race was refused.")
+
+    text_blocks = [block.text for block in response.content if getattr(block, "type", None) == "text"]
+    if not text_blocks:
+        raise ValueError(f"Model response for the {office} race contained no text output.")
+
+    result = parse_lookup_response(zipcode, text_blocks[-1])
+    if not result.races:
+        raise ValueError(f"Model response for the {office} race did not include a race.")
+    return result.races[0]
+
+
 def find_local_elections(zipcode: str, client: "anthropic.Anthropic | None" = None) -> LookupResult:
     if client is None:
         if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -172,18 +203,28 @@ def find_local_elections(zipcode: str, client: "anthropic.Anthropic | None" = No
             )
         client = anthropic.Anthropic()
 
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=8000,
-        tools=[{"type": "web_search_20260209", "name": "web_search"}],
-        messages=[{"role": "user", "content": PROMPT_TEMPLATE.format(zipcode=zipcode)}],
+    races_by_office: dict[str, Race] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(OFFICES)) as executor:
+        future_to_office = {
+            executor.submit(_search_one_office, zipcode, office, client): office
+            for office in OFFICES
+        }
+        for future in concurrent.futures.as_completed(future_to_office):
+            office = future_to_office[future]
+            try:
+                races_by_office[office] = future.result()
+            except Exception as exc:
+                races_by_office[office] = Race(
+                    office=office,
+                    jurisdiction_name="Unknown",
+                    election_date=None,
+                    election_type=None,
+                    candidates=[],
+                    notes=f"Search for this race failed: {exc}",
+                )
+
+    return LookupResult(
+        zipcode=zipcode,
+        races=[races_by_office[office] for office in OFFICES],
+        retrieved_at=datetime.now(timezone.utc).isoformat(),
     )
-
-    if response.stop_reason == "refusal":
-        raise RuntimeError("The search request was refused. Try a different zip code or try again.")
-
-    text_blocks = [block.text for block in response.content if getattr(block, "type", None) == "text"]
-    if not text_blocks:
-        raise ValueError("Model response contained no text output to parse.")
-
-    return parse_lookup_response(zipcode, text_blocks[-1])

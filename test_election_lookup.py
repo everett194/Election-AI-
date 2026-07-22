@@ -80,18 +80,54 @@ def _mock_response(text: str):
     return response
 
 
-def test_find_local_elections_uses_client_and_parses_result():
+def _valid_single_race_json(office: str) -> str:
+    jurisdiction = {
+        "mayor": "Springfield",
+        "county": "Example County",
+        "us_house": "Example District",
+    }[office]
+    return f"""{{
+      "races": [
+        {{
+          "office": "{office}",
+          "jurisdiction_name": "{jurisdiction}",
+          "election_date": "2026-11-03",
+          "election_type": "general",
+          "notes": null,
+          "candidates": []
+        }}
+      ]
+    }}"""
+
+
+def _office_from_prompt(content: str) -> str:
+    if "mayoral election" in content:
+        return "mayor"
+    if "county-level election" in content:
+        return "county"
+    if "U.S. House" in content:
+        return "us_house"
+    raise AssertionError(f"unrecognized prompt: {content[:80]!r}")
+
+
+def test_find_local_elections_makes_three_scoped_parallel_calls():
     fake_client = MagicMock()
-    fake_client.messages.create.return_value = _mock_response(VALID_RESPONSE)
+
+    def side_effect(*args, **kwargs):
+        office = _office_from_prompt(kwargs["messages"][0]["content"])
+        return _mock_response(_valid_single_race_json(office))
+
+    fake_client.messages.create.side_effect = side_effect
 
     result = find_local_elections("62704", client=fake_client)
 
-    assert result.zipcode == "62704"
-    assert len(result.races) == 2
-    called_kwargs = fake_client.messages.create.call_args.kwargs
-    assert called_kwargs["model"] == "claude-opus-4-8"
-    assert any(t.get("type") == "web_search_20260209" for t in called_kwargs["tools"])
-    assert "62704" in called_kwargs["messages"][0]["content"]
+    assert fake_client.messages.create.call_count == 3
+    assert [r.office for r in result.races] == ["mayor", "county", "us_house"]
+    assert result.races[0].jurisdiction_name == "Springfield"
+
+    for call in fake_client.messages.create.call_args_list:
+        assert call.kwargs["output_config"] == {"effort": "low"}
+        assert call.kwargs["tools"][0]["max_uses"] == 5
 
 
 def test_find_local_elections_raises_without_api_key(monkeypatch):
@@ -100,12 +136,24 @@ def test_find_local_elections_raises_without_api_key(monkeypatch):
         find_local_elections("62704")
 
 
-def test_find_local_elections_raises_on_refusal():
+def test_find_local_elections_degrades_gracefully_on_single_office_failure():
     fake_client = MagicMock()
-    refusal_response = MagicMock()
-    refusal_response.content = []
-    refusal_response.stop_reason = "refusal"
-    fake_client.messages.create.return_value = refusal_response
 
-    with pytest.raises(RuntimeError, match="refus"):
-        find_local_elections("62704", client=fake_client)
+    def side_effect(*args, **kwargs):
+        office = _office_from_prompt(kwargs["messages"][0]["content"])
+        if office == "county":
+            refusal_response = MagicMock()
+            refusal_response.content = []
+            refusal_response.stop_reason = "refusal"
+            return refusal_response
+        return _mock_response(_valid_single_race_json(office))
+
+    fake_client.messages.create.side_effect = side_effect
+
+    result = find_local_elections("62704", client=fake_client)
+
+    by_office = {r.office: r for r in result.races}
+    assert by_office["mayor"].jurisdiction_name == "Springfield"
+    assert by_office["us_house"].jurisdiction_name == "Example District"
+    assert by_office["county"].candidates == []
+    assert "failed" in by_office["county"].notes.lower()
