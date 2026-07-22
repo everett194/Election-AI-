@@ -91,12 +91,22 @@ def main() -> None:
 
     if search_clicked and zipcode:
         if zipcode not in st.session_state.lookup_cache:
-            with st.spinner("Searching official sources..."):
+            with st.status(
+                "Searching official sources for mayoral, county, and U.S. House races...",
+                expanded=True,
+            ) as status:
+                st.write(
+                    "This runs several real web searches per race and commonly takes "
+                    "1-3 minutes -- it is still working even if nothing appears to "
+                    "change for a while."
+                )
                 try:
                     st.session_state.lookup_cache[zipcode] = find_local_elections(zipcode)
                 except Exception as exc:
+                    status.update(label="Search failed", state="error")
                     st.error(f"Search failed: {exc}")
                     return
+                status.update(label="Search complete", state="complete", expanded=False)
 
     if zipcode in st.session_state.lookup_cache:
         render_result(st.session_state.lookup_cache[zipcode])
