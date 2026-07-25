@@ -1,7 +1,18 @@
 from unittest.mock import MagicMock
 
 import pytest
-from election_lookup import parse_lookup_response, find_local_elections, LookupResult
+from election_lookup import (
+    Candidate,
+    CandidateIssuePosition,
+    CandidateIssueProfile,
+    LookupResult,
+    Position,
+    find_local_elections,
+    parse_candidate_research_response,
+    parse_lookup_response,
+    research_candidate_positions,
+)
+from questionnaire_scoring import QUESTIONS
 
 
 VALID_RESPONSE = """
@@ -41,6 +52,26 @@ VALID_RESPONSE = """
 """
 
 
+CANDIDATE_RESEARCH_JSON = """
+{
+  "positions": [
+    {
+      "question_id": "housing_zoning_density",
+      "position": 4,
+      "confidence": "high",
+      "source": {"url": "https://example.com/vote411", "title": "Vote411 candidate guide"}
+    },
+    {
+      "question_id": "taxes_shortfall",
+      "position": 2,
+      "confidence": "medium",
+      "source": {"url": "https://example.com/news", "title": null}
+    }
+  ]
+}
+"""
+
+
 def test_parses_valid_response():
     result = parse_lookup_response("62704", VALID_RESPONSE)
     assert isinstance(result, LookupResult)
@@ -68,6 +99,46 @@ def test_raises_on_malformed_json():
 def test_raises_on_missing_races_key():
     with pytest.raises(ValueError):
         parse_lookup_response("62704", "{}")
+
+
+def test_parses_candidate_research_response():
+    profile = parse_candidate_research_response("Jane Doe", "mayor", CANDIDATE_RESEARCH_JSON)
+    assert profile.candidate_name == "Jane Doe"
+    assert profile.office == "mayor"
+    assert profile.positions == {"housing_zoning_density": 4, "taxes_shortfall": 2}
+    assert len(profile.sourced_positions) == 2
+    assert profile.sourced_positions[0].question_id == "housing_zoning_density"
+    assert profile.sourced_positions[0].position == 4
+    assert profile.sourced_positions[0].confidence == "high"
+    assert profile.sourced_positions[0].source.url == "https://example.com/vote411"
+    assert profile.sourced_positions[0].source.title == "Vote411 candidate guide"
+    assert profile.sourced_positions[1].source.title is None
+
+
+def test_parses_candidate_research_response_with_zero_coverage():
+    profile = parse_candidate_research_response("Jane Doe", "mayor", '{"positions": []}')
+    assert profile.positions == {}
+    assert profile.sourced_positions == []
+
+
+def test_candidate_research_response_raises_on_malformed_json():
+    with pytest.raises(ValueError):
+        parse_candidate_research_response("Jane Doe", "mayor", "not json at all")
+
+
+def test_candidate_research_response_raises_on_missing_positions_key():
+    with pytest.raises(ValueError):
+        parse_candidate_research_response("Jane Doe", "mayor", "{}")
+
+
+def test_candidate_research_response_ignores_unknown_question_ids():
+    raw = (
+        '{"positions": [{"question_id": "not_a_real_question", "position": 3, '
+        '"confidence": "low", "source": {"url": "https://example.com"}}]}'
+    )
+    profile = parse_candidate_research_response("Jane Doe", "mayor", raw)
+    assert profile.positions == {}
+    assert profile.sourced_positions == []
 
 
 def _mock_response(text: str):
@@ -157,3 +228,81 @@ def test_find_local_elections_degrades_gracefully_on_single_office_failure():
     assert by_office["us_house"].jurisdiction_name == "Example District"
     assert by_office["county"].candidates == []
     assert "failed" in by_office["county"].notes.lower()
+
+
+def test_research_candidate_positions_calls_api_with_all_questions_and_context():
+    fake_client = MagicMock()
+    captured = {}
+
+    def side_effect(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return _mock_response(CANDIDATE_RESEARCH_JSON)
+
+    fake_client.messages.create.side_effect = side_effect
+
+    candidate = Candidate(
+        name="Jane Doe",
+        party="Independent",
+        incumbent=True,
+        positions=[
+            Position(
+                summary="Supports expanding the downtown bus line.",
+                confidence="high",
+                sources=[],
+            )
+        ],
+    )
+
+    profile = research_candidate_positions(
+        "62704", "mayor", "Springfield", candidate, client=fake_client
+    )
+
+    assert profile.candidate_name == "Jane Doe"
+    assert profile.office == "mayor"
+    assert profile.positions == {"housing_zoning_density": 4, "taxes_shortfall": 2}
+
+    prompt = captured["kwargs"]["messages"][0]["content"]
+    assert "Jane Doe" in prompt
+    assert "Independent" in prompt
+    assert "incumbent" in prompt.lower()
+    assert "Springfield" in prompt
+    assert "Supports expanding the downtown bus line." in prompt
+    for question in QUESTIONS:
+        assert question.id in prompt
+
+    assert captured["kwargs"]["model"] == "claude-sonnet-5"
+    assert captured["kwargs"]["output_config"] == {"effort": "low"}
+    assert captured["kwargs"]["tools"][0]["max_uses"] == 5
+
+
+def test_research_candidate_positions_omits_context_for_candidate_with_no_known_info():
+    fake_client = MagicMock()
+    fake_client.messages.create.return_value = _mock_response('{"positions": []}')
+
+    candidate = Candidate(name="Pat Lee", party=None, incumbent=None, positions=[])
+    research_candidate_positions("62704", "us_house", "Example District", candidate, client=fake_client)
+
+    prompt = fake_client.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert "Pat Lee" in prompt
+    assert "Example District" in prompt
+    assert "(incumbent)" not in prompt
+    assert "Positions already documented for this candidate" not in prompt
+
+
+def test_research_candidate_positions_raises_without_api_key(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    candidate = Candidate(name="Jane Doe", party=None, incumbent=None, positions=[])
+    with pytest.raises(RuntimeError):
+        research_candidate_positions("62704", "mayor", "Springfield", candidate)
+
+
+def test_research_candidate_positions_raises_on_refusal():
+    fake_client = MagicMock()
+    refusal_response = MagicMock()
+    refusal_response.content = []
+    refusal_response.stop_reason = "refusal"
+    fake_client.messages.create.return_value = refusal_response
+
+    candidate = Candidate(name="Jane Doe", party=None, incumbent=None, positions=[])
+    with pytest.raises(RuntimeError):
+        research_candidate_positions("62704", "mayor", "Springfield", candidate, client=fake_client)

@@ -9,6 +9,8 @@ from typing import Iterator, Literal
 
 import anthropic
 
+from questionnaire_scoring import QUESTIONS, QUESTIONS_BY_ID
+
 
 @dataclass
 class Source:
@@ -46,6 +48,22 @@ class LookupResult:
     zipcode: str
     races: list[Race]
     retrieved_at: str
+
+
+@dataclass
+class CandidateIssuePosition:
+    question_id: str
+    position: int  # 1-5, same scale as the voter's own answers
+    confidence: Literal["high", "medium", "low"]
+    source: Source
+
+
+@dataclass
+class CandidateIssueProfile:
+    candidate_name: str
+    office: Literal["mayor", "county", "us_house"]
+    positions: dict[str, int]  # question_id -> 1-5; feeds compute_candidate_compatibility directly
+    sourced_positions: list[CandidateIssuePosition] = field(default_factory=list)
 
 
 def _strip_code_fence(text: str) -> str:
@@ -107,6 +125,44 @@ def parse_lookup_response(zipcode: str, raw_text: str) -> LookupResult:
     )
 
 
+def parse_candidate_research_response(
+    candidate_name: str, office: str, raw_text: str
+) -> CandidateIssueProfile:
+    cleaned = _strip_code_fence(raw_text)
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Model response was not valid JSON: {exc}") from exc
+
+    if "positions" not in data or not isinstance(data["positions"], list):
+        raise ValueError("Model response JSON is missing a 'positions' array")
+
+    sourced_positions: list[CandidateIssuePosition] = []
+    positions_by_id: dict[str, int] = {}
+    for pos_data in data["positions"]:
+        question_id = pos_data["question_id"]
+        if question_id not in QUESTIONS_BY_ID:
+            # Defensively skip an id the model invented rather than failing
+            # the whole response over one bad entry.
+            continue
+        source_data = pos_data["source"]
+        position = CandidateIssuePosition(
+            question_id=question_id,
+            position=pos_data["position"],
+            confidence=pos_data["confidence"],
+            source=Source(url=source_data["url"], title=source_data.get("title")),
+        )
+        sourced_positions.append(position)
+        positions_by_id[question_id] = position.position
+
+    return CandidateIssueProfile(
+        candidate_name=candidate_name,
+        office=office,
+        positions=positions_by_id,
+        sourced_positions=sourced_positions,
+    )
+
+
 MODEL = "claude-sonnet-5"
 
 OFFICES: tuple[str, ...] = ("mayor", "county", "us_house")
@@ -118,6 +174,58 @@ OFFICE_DESCRIPTIONS = {
     "us_house": "the next U.S. House of Representatives election for the congressional "
     "district containing this zip code",
 }
+
+
+CANDIDATE_RESEARCH_PROMPT_TEMPLATE = """You are researching one candidate's positions on a set \
+of local-policy questions, for a nonpartisan voter-education tool. For EACH question below, only \
+answer it if you find real, checkable evidence of this specific candidate's position -- never \
+invent, infer, or guess based on party affiliation, endorsements, or general reputation. If you \
+find no real source for a question, leave it out entirely.
+
+When searching, prioritize sources in this order: (1) the candidate's own direct response to \
+this questionnaire or a near-identical one, (2) established third-party candidate questionnaires \
+such as Vote411 or Ballotpedia's Candidate Connection, (3) official statements or voting/public \
+records, (4) reputable local news coverage of the candidate's platform or forum appearances, \
+(5) the candidate's own campaign materials. Work efficiently -- a handful of well-chosen searches \
+is enough; this does not need to be exhaustive.
+
+Candidate: {candidate_name}{party_clause}{incumbent_clause}
+Race: {office_description} ({jurisdiction_name})
+{known_positions_clause}
+For each of the following {question_count} questions, the candidate's position is on a 1-5 scale, \
+where 1 means they fully favor the first approach, 5 means they fully favor the second approach, \
+and 3 means their position is genuinely mixed/moderate between the two (only use 3 when you have \
+real evidence of a mixed or moderate stance, not as a default for missing information).
+
+{questions_block}
+
+Respond with ONLY a single JSON object (no markdown fences, no prose before or after) in exactly \
+this shape, including ONLY the questions you found real evidence for:
+
+{{
+  "positions": [
+    {{
+      "question_id": "<one of the question ids above>",
+      "position": 1 | 2 | 3 | 4 | 5,
+      "confidence": "high" | "medium" | "low",
+      "source": {{"url": "<string>", "title": "<string or null>"}}
+    }}
+  ]
+}}
+"""
+
+
+def _format_questions_block() -> str:
+    lines = []
+    for question in QUESTIONS:
+        lines.append(
+            f"- id: {question.id}\n"
+            f"  question: {question.text}\n"
+            f"  approach 1 (position 1-2): {question.approach_1}\n"
+            f"  approach 2 (position 4-5): {question.approach_2}"
+        )
+    return "\n".join(lines)
+
 
 SINGLE_OFFICE_PROMPT_TEMPLATE = """You are researching an upcoming local election for a US \
 zip code, for a nonpartisan voter-education tool. Prioritize official sources (state/county/ \
@@ -233,3 +341,61 @@ def find_local_elections(zipcode: str, client: "anthropic.Anthropic | None" = No
         races=list(iter_local_elections(zipcode, client)),
         retrieved_at=datetime.now(timezone.utc).isoformat(),
     )
+
+
+def research_candidate_positions(
+    zipcode: str,
+    office: str,
+    jurisdiction_name: str,
+    candidate: Candidate,
+    client: "anthropic.Anthropic | None" = None,
+) -> CandidateIssueProfile:
+    if client is None:
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY is not set. Set it in your environment before "
+                "searching (e.g. `export ANTHROPIC_API_KEY=sk-ant-...`)."
+            )
+        client = anthropic.Anthropic()
+
+    party_clause = f", {candidate.party}" if candidate.party else ""
+    incumbent_clause = " (incumbent)" if candidate.incumbent else ""
+    if candidate.positions:
+        known_lines = "\n".join(
+            f"- {position.summary} (confidence: {position.confidence})"
+            for position in candidate.positions
+        )
+        known_positions_clause = (
+            "\nPositions already documented for this candidate, for context "
+            f"(you may find more specific evidence for the questions below):\n{known_lines}\n"
+        )
+    else:
+        known_positions_clause = ""
+
+    prompt = CANDIDATE_RESEARCH_PROMPT_TEMPLATE.format(
+        candidate_name=candidate.name,
+        party_clause=party_clause,
+        incumbent_clause=incumbent_clause,
+        office_description=OFFICE_DESCRIPTIONS[office],
+        jurisdiction_name=jurisdiction_name,
+        known_positions_clause=known_positions_clause,
+        question_count=len(QUESTIONS),
+        questions_block=_format_questions_block(),
+    )
+
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=4000,
+        tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 5}],
+        output_config={"effort": "low"},
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    if response.stop_reason == "refusal":
+        raise RuntimeError(f"The search for {candidate.name}'s positions was refused.")
+
+    text_blocks = [block.text for block in response.content if getattr(block, "type", None) == "text"]
+    if not text_blocks:
+        raise ValueError(f"Model response for {candidate.name} contained no text output.")
+
+    return parse_candidate_research_response(candidate.name, office, text_blocks[-1])
