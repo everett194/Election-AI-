@@ -115,6 +115,15 @@ if zipcode in st.session_state.lookup_cache and zipcode not in st.session_state.
     # resumes the search on the next run instead of losing everything found
     # so far -- otherwise the whole result set (and the click) disappears.
     result = st.session_state.lookup_cache[zipcode]
+    # Defensively collapse to one race per office in case a duplicate was
+    # ever recorded (e.g. by an interrupted run under an older version of
+    # this code) -- otherwise re-rendering below raises a duplicate widget
+    # key error for that office's button.
+    deduped_by_office: dict[str, Race] = {}
+    for race in result.races:
+        deduped_by_office[race.office] = race
+    result.races = [deduped_by_office[office] for office in OFFICES if office in deduped_by_office]
+
     st.caption(f"Retrieved at {result.retrieved_at}")
     placeholders = {office: st.empty() for office in OFFICES}
     progress_labels = {"mayor": "mayoral", "county": "county", "us_house": "U.S. House"}
@@ -123,7 +132,7 @@ if zipcode in st.session_state.lookup_cache and zipcode not in st.session_state.
         with placeholders[race.office].container():
             render_race(race.office, race, zipcode)
 
-    already_found = {race.office for race in result.races}
+    already_found = set(deduped_by_office)
     remaining_offices = tuple(office for office in OFFICES if office not in already_found)
 
     with st.status(
@@ -137,7 +146,9 @@ if zipcode in st.session_state.lookup_cache and zipcode not in st.session_state.
         )
         try:
             for race in iter_local_elections(zipcode, offices=remaining_offices):
-                result.races.append(race)
+                if race.office not in already_found:
+                    result.races.append(race)
+                    already_found.add(race.office)
                 with placeholders[race.office].container():
                     render_race(race.office, race, zipcode)
                 status.write(f"Found the {progress_labels[race.office]} race.")
