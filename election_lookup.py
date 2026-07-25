@@ -5,7 +5,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Iterator, Literal
 
 import anthropic
 
@@ -193,7 +193,13 @@ def _search_one_office(zipcode: str, office: str, client: "anthropic.Anthropic")
     return result.races[0]
 
 
-def find_local_elections(zipcode: str, client: "anthropic.Anthropic | None" = None) -> LookupResult:
+def iter_local_elections(zipcode: str, client: "anthropic.Anthropic | None" = None) -> Iterator[Race]:
+    """Yield each office's Race as soon as its search completes.
+
+    Runs the same three sequential per-office searches as find_local_elections,
+    but yields incrementally so a caller (e.g. the UI) can display results as
+    they arrive instead of waiting for all three.
+    """
     if client is None:
         if not os.environ.get("ANTHROPIC_API_KEY"):
             raise RuntimeError(
@@ -202,12 +208,11 @@ def find_local_elections(zipcode: str, client: "anthropic.Anthropic | None" = No
             )
         client = anthropic.Anthropic()
 
-    races_by_office: dict[str, Race] = {}
     for office in OFFICES:
         try:
-            races_by_office[office] = _search_one_office(zipcode, office, client)
+            yield _search_one_office(zipcode, office, client)
         except Exception as exc:
-            races_by_office[office] = Race(
+            yield Race(
                 office=office,
                 jurisdiction_name="Unknown",
                 election_date=None,
@@ -216,8 +221,10 @@ def find_local_elections(zipcode: str, client: "anthropic.Anthropic | None" = No
                 notes=f"Search for this race failed: {exc}",
             )
 
+
+def find_local_elections(zipcode: str, client: "anthropic.Anthropic | None" = None) -> LookupResult:
     return LookupResult(
         zipcode=zipcode,
-        races=[races_by_office[office] for office in OFFICES],
+        races=list(iter_local_elections(zipcode, client)),
         retrieved_at=datetime.now(timezone.utc).isoformat(),
     )

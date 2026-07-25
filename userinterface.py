@@ -11,13 +11,16 @@ Run with:
 """
 
 import re
+from datetime import datetime, timezone
 
 import streamlit as st
 
-from election_lookup import LookupResult, find_local_elections
+from election_lookup import LookupResult, Race, iter_local_elections
 from questionnaire_ui import render_questionnaire
 
 ZIP_PATTERN = re.compile(r"^\d{5}$")
+
+OFFICES = ("mayor", "county", "us_house")
 
 OFFICE_LABELS = {
     "mayor": "Mayoral",
@@ -31,50 +34,52 @@ def is_valid_zipcode(zipcode: str) -> bool:
     return bool(ZIP_PATTERN.match(zipcode.strip()))
 
 
+def render_race(office: str, race: Race | None, zipcode: str) -> None:
+    with st.expander(OFFICE_LABELS[office], expanded=True):
+        if race is None:
+            st.write("No information found for this race type.")
+            return
+
+        if race.election_date:
+            st.write(f"**{race.jurisdiction_name}** — {race.election_date} ({race.election_type})")
+        else:
+            st.write(f"**{race.jurisdiction_name}**")
+
+        if race.notes:
+            st.info(race.notes)
+
+        if not race.candidates:
+            st.write("No candidates found.")
+        else:
+            for candidate in race.candidates:
+                header = candidate.name
+                if candidate.party:
+                    header += f" ({candidate.party})"
+                if candidate.incumbent:
+                    header += " — incumbent"
+                st.markdown(f"**{header}**")
+
+                if not candidate.positions:
+                    st.write("No documented position found.")
+                    continue
+
+                for position in candidate.positions:
+                    badge = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(position.confidence, "⚪")
+                    st.write(f"{badge} {position.summary} _(confidence: {position.confidence})_")
+                    for source in position.sources:
+                        st.markdown(f"  - [{source.title or source.url}]({source.url})")
+
+        if st.button("Take the issues questionnaire", key=f"take_quiz_{office}"):
+            st.session_state.show_questionnaire = True
+            st.session_state.questionnaire_from_office = office
+            st.session_state.questionnaire_from_zip = zipcode
+
+
 def render_result(result: LookupResult) -> None:
     st.caption(f"Retrieved at {result.retrieved_at}")
     by_office = {race.office: race for race in result.races}
-
-    for office in ("mayor", "county", "us_house"):
-        race = by_office.get(office)
-        with st.expander(OFFICE_LABELS[office], expanded=True):
-            if race is None:
-                st.write("No information found for this race type.")
-                continue
-
-            if race.election_date:
-                st.write(f"**{race.jurisdiction_name}** — {race.election_date} ({race.election_type})")
-            else:
-                st.write(f"**{race.jurisdiction_name}**")
-
-            if race.notes:
-                st.info(race.notes)
-
-            if not race.candidates:
-                st.write("No candidates found.")
-            else:
-                for candidate in race.candidates:
-                    header = candidate.name
-                    if candidate.party:
-                        header += f" ({candidate.party})"
-                    if candidate.incumbent:
-                        header += " — incumbent"
-                    st.markdown(f"**{header}**")
-
-                    if not candidate.positions:
-                        st.write("No documented position found.")
-                        continue
-
-                    for position in candidate.positions:
-                        badge = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(position.confidence, "⚪")
-                        st.write(f"{badge} {position.summary} _(confidence: {position.confidence})_")
-                        for source in position.sources:
-                            st.markdown(f"  - [{source.title or source.url}]({source.url})")
-
-            if st.button("Take the issues questionnaire", key=f"take_quiz_{office}"):
-                st.session_state.show_questionnaire = True
-                st.session_state.questionnaire_from_office = office
-                st.session_state.questionnaire_from_zip = result.zipcode
+    for office in OFFICES:
+        render_race(office, by_office.get(office), result.zipcode)
 
 
 st.title("Election AI - User Interface")
@@ -91,27 +96,45 @@ search_clicked = st.button("Find my elections")
 if "lookup_cache" not in st.session_state:
     st.session_state.lookup_cache = {}
 
+rendered_live = False
+
 if zipcode and not is_valid_zipcode(zipcode):
     st.error("Please enter a valid 5-digit zip code (e.g. 90210).")
-elif search_clicked and zipcode:
-    if zipcode not in st.session_state.lookup_cache:
-        with st.status(
-            "Searching official sources for mayoral, county, and U.S. House races...",
-            expanded=True,
-        ) as status:
-            st.write(
-                "Running three scoped searches (mayoral, county, U.S. House), one "
-                "at a time. This commonly takes a minute or two."
-            )
-            try:
-                st.session_state.lookup_cache[zipcode] = find_local_elections(zipcode)
-            except Exception as exc:
-                status.update(label="Search failed", state="error")
-                st.error(f"Search failed: {exc}")
-            else:
-                status.update(label="Search complete", state="complete", expanded=False)
+elif search_clicked and zipcode and zipcode not in st.session_state.lookup_cache:
+    retrieved_at = datetime.now(timezone.utc).isoformat()
+    st.caption(f"Retrieved at {retrieved_at}")
+    placeholders = {office: st.empty() for office in OFFICES}
+    progress_labels = {"mayor": "mayoral", "county": "county", "us_house": "U.S. House"}
 
-if zipcode in st.session_state.lookup_cache:
+    with st.status(
+        "Searching official sources for mayoral, county, and U.S. House races...",
+        expanded=True,
+    ) as status:
+        st.write(
+            "Running three scoped searches (mayoral, county, U.S. House), one "
+            "at a time. Results appear above as each one finishes; this "
+            "commonly takes a minute or two in total."
+        )
+        races: list[Race] = []
+        try:
+            for race in iter_local_elections(zipcode):
+                races.append(race)
+                with placeholders[race.office].container():
+                    render_race(race.office, race, zipcode)
+                status.write(f"Found the {progress_labels[race.office]} race.")
+        except Exception as exc:
+            status.update(label="Search failed", state="error")
+            st.error(f"Search failed: {exc}")
+        else:
+            st.session_state.lookup_cache[zipcode] = LookupResult(
+                zipcode=zipcode,
+                races=races,
+                retrieved_at=retrieved_at,
+            )
+            status.update(label="Search complete", state="complete", expanded=False)
+    rendered_live = True
+
+if not rendered_live and zipcode in st.session_state.lookup_cache:
     render_result(st.session_state.lookup_cache[zipcode])
 
 if st.session_state.get("show_questionnaire"):
