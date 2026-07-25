@@ -110,7 +110,7 @@ def _office_from_prompt(content: str) -> str:
     raise AssertionError(f"unrecognized prompt: {content[:80]!r}")
 
 
-def test_find_local_elections_makes_three_scoped_parallel_calls():
+def test_find_local_elections_makes_three_scoped_calls():
     fake_client = MagicMock()
 
     def side_effect(*args, **kwargs):

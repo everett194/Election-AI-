@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import concurrent.futures
 import json
 import os
 import re
@@ -108,7 +107,7 @@ def parse_lookup_response(zipcode: str, raw_text: str) -> LookupResult:
     )
 
 
-MODEL = "claude-opus-4-8"
+MODEL = "claude-sonnet-5"
 
 OFFICES: tuple[str, ...] = ("mayor", "county", "us_house")
 
@@ -204,24 +203,18 @@ def find_local_elections(zipcode: str, client: "anthropic.Anthropic | None" = No
         client = anthropic.Anthropic()
 
     races_by_office: dict[str, Race] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(OFFICES)) as executor:
-        future_to_office = {
-            executor.submit(_search_one_office, zipcode, office, client): office
-            for office in OFFICES
-        }
-        for future in concurrent.futures.as_completed(future_to_office):
-            office = future_to_office[future]
-            try:
-                races_by_office[office] = future.result()
-            except Exception as exc:
-                races_by_office[office] = Race(
-                    office=office,
-                    jurisdiction_name="Unknown",
-                    election_date=None,
-                    election_type=None,
-                    candidates=[],
-                    notes=f"Search for this race failed: {exc}",
-                )
+    for office in OFFICES:
+        try:
+            races_by_office[office] = _search_one_office(zipcode, office, client)
+        except Exception as exc:
+            races_by_office[office] = Race(
+                office=office,
+                jurisdiction_name="Unknown",
+                election_date=None,
+                election_type=None,
+                candidates=[],
+                notes=f"Search for this race failed: {exc}",
+            )
 
     return LookupResult(
         zipcode=zipcode,

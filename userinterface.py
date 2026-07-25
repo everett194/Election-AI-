@@ -96,8 +96,8 @@ def main() -> None:
                 expanded=True,
             ) as status:
                 st.write(
-                    "Running three scoped searches (mayoral, county, U.S. House) in "
-                    "parallel. This usually finishes in under a minute."
+                    "Running three scoped searches (mayoral, county, U.S. House), one "
+                    "at a time. This commonly takes a minute or two."
                 )
                 try:
                     st.session_state.lookup_cache[zipcode] = find_local_elections(zipcode)
