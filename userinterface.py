@@ -95,16 +95,36 @@ search_clicked = st.button("Find my elections")
 
 if "lookup_cache" not in st.session_state:
     st.session_state.lookup_cache = {}
+if "lookup_complete" not in st.session_state:
+    st.session_state.lookup_complete = set()
 
 rendered_live = False
 
 if zipcode and not is_valid_zipcode(zipcode):
     st.error("Please enter a valid 5-digit zip code (e.g. 90210).")
 elif search_clicked and zipcode and zipcode not in st.session_state.lookup_cache:
-    retrieved_at = datetime.now(timezone.utc).isoformat()
-    st.caption(f"Retrieved at {retrieved_at}")
+    st.session_state.lookup_cache[zipcode] = LookupResult(
+        zipcode=zipcode, races=[], retrieved_at=datetime.now(timezone.utc).isoformat()
+    )
+
+if zipcode in st.session_state.lookup_cache and zipcode not in st.session_state.lookup_complete:
+    # Interacting with any widget (e.g. "Take the issues questionnaire") while
+    # this search is still running for other offices cancels the in-flight
+    # script run before it would normally finish. Progress already appended
+    # to `result.races` below survives that cancellation, and this branch
+    # resumes the search on the next run instead of losing everything found
+    # so far -- otherwise the whole result set (and the click) disappears.
+    result = st.session_state.lookup_cache[zipcode]
+    st.caption(f"Retrieved at {result.retrieved_at}")
     placeholders = {office: st.empty() for office in OFFICES}
     progress_labels = {"mayor": "mayoral", "county": "county", "us_house": "U.S. House"}
+
+    for race in result.races:
+        with placeholders[race.office].container():
+            render_race(race.office, race, zipcode)
+
+    already_found = {race.office for race in result.races}
+    remaining_offices = tuple(office for office in OFFICES if office not in already_found)
 
     with st.status(
         "Searching official sources for mayoral, county, and U.S. House races...",
@@ -115,10 +135,9 @@ elif search_clicked and zipcode and zipcode not in st.session_state.lookup_cache
             "at a time. Results appear above as each one finishes; this "
             "commonly takes a minute or two in total."
         )
-        races: list[Race] = []
         try:
-            for race in iter_local_elections(zipcode):
-                races.append(race)
+            for race in iter_local_elections(zipcode, offices=remaining_offices):
+                result.races.append(race)
                 with placeholders[race.office].container():
                     render_race(race.office, race, zipcode)
                 status.write(f"Found the {progress_labels[race.office]} race.")
@@ -126,11 +145,7 @@ elif search_clicked and zipcode and zipcode not in st.session_state.lookup_cache
             status.update(label="Search failed", state="error")
             st.error(f"Search failed: {exc}")
         else:
-            st.session_state.lookup_cache[zipcode] = LookupResult(
-                zipcode=zipcode,
-                races=races,
-                retrieved_at=retrieved_at,
-            )
+            st.session_state.lookup_complete.add(zipcode)
             status.update(label="Search complete", state="complete", expanded=False)
     rendered_live = True
 

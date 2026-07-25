@@ -193,12 +193,17 @@ def _search_one_office(zipcode: str, office: str, client: "anthropic.Anthropic")
     return result.races[0]
 
 
-def iter_local_elections(zipcode: str, client: "anthropic.Anthropic | None" = None) -> Iterator[Race]:
+def iter_local_elections(
+    zipcode: str,
+    client: "anthropic.Anthropic | None" = None,
+    offices: tuple[str, ...] = OFFICES,
+) -> Iterator[Race]:
     """Yield each office's Race as soon as its search completes.
 
-    Runs the same three sequential per-office searches as find_local_elections,
-    but yields incrementally so a caller (e.g. the UI) can display results as
-    they arrive instead of waiting for all three.
+    Runs the same sequential per-office searches as find_local_elections, but
+    yields incrementally so a caller (e.g. the UI) can display results as they
+    arrive instead of waiting for all three. Pass a subset of `offices` to
+    resume a search that was interrupted after some offices already completed.
     """
     if client is None:
         if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -208,7 +213,7 @@ def iter_local_elections(zipcode: str, client: "anthropic.Anthropic | None" = No
             )
         client = anthropic.Anthropic()
 
-    for office in OFFICES:
+    for office in offices:
         try:
             yield _search_one_office(zipcode, office, client)
         except Exception as exc:
