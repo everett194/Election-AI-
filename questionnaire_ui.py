@@ -14,7 +14,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from election_lookup import Race, research_candidate_positions
+from election_lookup import CandidateIssueProfile, Race, research_candidate_positions
 from questionnaire_scoring import (
     CATEGORY_LABELS,
     QUESTIONS,
@@ -39,6 +39,54 @@ CANDIDATE_COLORS = ["#9D755D", "#54A24B", "#F58518", "#B279A2", "#72B7B2"]
 
 def _candidate_cache_key(zipcode: str, office: str, candidate_name: str) -> tuple[str, str, str]:
     return (zipcode, office, candidate_name)
+
+
+def _auto_research_candidates(from_office: str | None, from_zip: str | None, race: Race | None) -> None:
+    """Automatically research every not-yet-researched candidate in `race` and
+    cache the results, so the voter doesn't have to trigger it per candidate.
+
+    Each candidate's result is committed to session state immediately after
+    its search returns, with no other Streamlit call in between -- so
+    interrupting one candidate's search (e.g. by clicking something else)
+    never loses an already-completed candidate's result. The next rerun
+    just resumes with whatever candidates are still missing a profile.
+    """
+    if not (from_office and from_zip and race and race.candidates):
+        return
+
+    pending = [
+        candidate
+        for candidate in race.candidates
+        if _candidate_cache_key(from_zip, from_office, candidate.name)
+        not in st.session_state.candidate_profiles
+    ]
+    if not pending:
+        return
+
+    with st.status(
+        "Researching candidates' sourced positions on the 20 questions...",
+        expanded=True,
+    ) as status:
+        st.write(
+            "Running one real search per candidate, one at a time. This "
+            "commonly takes 30-60 seconds per candidate."
+        )
+        for candidate in pending:
+            key = _candidate_cache_key(from_zip, from_office, candidate.name)
+            try:
+                researched = research_candidate_positions(
+                    from_zip, from_office, race.jurisdiction_name, candidate
+                )
+            except Exception as exc:
+                st.session_state.candidate_profiles[key] = CandidateIssueProfile(
+                    candidate_name=candidate.name, office=from_office, positions={}, sourced_positions=[]
+                )
+                status.write(f"Could not research {candidate.name}: {exc}")
+            else:
+                st.session_state.candidate_profiles[key] = researched
+                st.session_state.mapped_candidates.add(key)
+                status.write(f"Researched {candidate.name}.")
+        status.update(label="Candidate research complete", state="complete", expanded=False)
 
 
 def _radar_chart(
@@ -196,14 +244,16 @@ def render_questionnaire(
     if "questionnaire_answers" not in st.session_state:
         return
 
-    st.subheader("Your results")
-    radar_scores = compute_radar_scores(st.session_state.questionnaire_importance)
-    econ_score, social_score = compute_compass_scores(st.session_state.questionnaire_answers)
-
     if "candidate_profiles" not in st.session_state:
         st.session_state.candidate_profiles = {}
     if "mapped_candidates" not in st.session_state:
         st.session_state.mapped_candidates = set()
+
+    _auto_research_candidates(from_office, from_zip, race)
+
+    st.subheader("Your results")
+    radar_scores = compute_radar_scores(st.session_state.questionnaire_importance)
+    econ_score, social_score = compute_compass_scores(st.session_state.questionnaire_answers)
 
     candidate_series: list[tuple[str, dict[str, float], str]] = []
     candidate_points: list[tuple[str, float, float, str]] = []
@@ -262,6 +312,11 @@ def _render_candidate_comparison(
         )
         return
 
+    st.caption(
+        "Candidates from this race are researched automatically above; use the "
+        "buttons below to control which ones show up on your charts."
+    )
+
     for index, candidate in enumerate(race.candidates):
         key = _candidate_cache_key(from_zip, from_office, candidate.name)
         profile = st.session_state.candidate_profiles.get(key)
@@ -274,27 +329,8 @@ def _render_candidate_comparison(
             st.markdown(f"**{header}**")
 
             if profile is None:
-                if st.button(f"Research and map {candidate.name}", key=f"map_{index}_{key}"):
-                    with st.status(
-                        f"Researching {candidate.name}'s positions on the 20 questions...",
-                        expanded=True,
-                    ) as status:
-                        st.write(
-                            "Searching for real, sourced evidence of this candidate's "
-                            "position on each question. This commonly takes 30-60 seconds."
-                        )
-                        try:
-                            researched = research_candidate_positions(
-                                from_zip, from_office, race.jurisdiction_name, candidate
-                            )
-                        except Exception as exc:
-                            status.update(label="Research failed", state="error")
-                            st.error(f"Research failed: {exc}")
-                        else:
-                            st.session_state.candidate_profiles[key] = researched
-                            st.session_state.mapped_candidates.add(key)
-                            status.update(label="Research complete", state="complete", expanded=False)
-                            st.rerun()
+                # Auto-research above always populates this before we get here;
+                # skip defensively rather than crash on an unexpected gap.
                 continue
 
             coverage = len(profile.sourced_positions)
