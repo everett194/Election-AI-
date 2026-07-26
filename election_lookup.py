@@ -276,26 +276,34 @@ exactly this shape:
 """
 
 
-def _search_one_office(zipcode: str, office: str, client: "anthropic.Anthropic") -> Race:
-    prompt = SINGLE_OFFICE_PROMPT_TEMPLATE.format(
-        zipcode=zipcode, office=office, office_description=OFFICE_DESCRIPTIONS[office]
-    )
+def _call_model_for_text(
+    client: "anthropic.Anthropic", prompt: str, max_tokens: int, refusal_subject: str
+) -> str:
     response = client.messages.create(
         model=MODEL,
-        max_tokens=3000,
+        max_tokens=max_tokens,
         tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 5}],
         output_config={"effort": "low"},
         messages=[{"role": "user", "content": prompt}],
     )
 
     if response.stop_reason == "refusal":
-        raise RuntimeError(f"The search for the {office} race was refused.")
+        raise RuntimeError(f"The search for {refusal_subject} was refused.")
 
     text_blocks = [block.text for block in response.content if getattr(block, "type", None) == "text"]
     if not text_blocks:
-        raise ValueError(f"Model response for the {office} race contained no text output.")
+        raise ValueError(f"Model response for {refusal_subject} contained no text output.")
 
-    result = parse_lookup_response(zipcode, text_blocks[-1])
+    return text_blocks[-1]
+
+
+def _search_one_office(zipcode: str, office: str, client: "anthropic.Anthropic") -> Race:
+    prompt = SINGLE_OFFICE_PROMPT_TEMPLATE.format(
+        zipcode=zipcode, office=office, office_description=OFFICE_DESCRIPTIONS[office]
+    )
+    text = _call_model_for_text(client, prompt, max_tokens=3000, refusal_subject=f"the {office} race")
+
+    result = parse_lookup_response(zipcode, text)
     if not result.races:
         raise ValueError(f"Model response for the {office} race did not include a race.")
     return result.races[0]
@@ -383,19 +391,8 @@ def research_candidate_positions(
         questions_block=_format_questions_block(),
     )
 
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=4000,
-        tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 5}],
-        output_config={"effort": "low"},
-        messages=[{"role": "user", "content": prompt}],
+    text = _call_model_for_text(
+        client, prompt, max_tokens=4000, refusal_subject=f"{candidate.name}'s positions"
     )
 
-    if response.stop_reason == "refusal":
-        raise RuntimeError(f"The search for {candidate.name}'s positions was refused.")
-
-    text_blocks = [block.text for block in response.content if getattr(block, "type", None) == "text"]
-    if not text_blocks:
-        raise ValueError(f"Model response for {candidate.name} contained no text output.")
-
-    return parse_candidate_research_response(candidate.name, office, text_blocks[-1])
+    return parse_candidate_research_response(candidate.name, office, text)
