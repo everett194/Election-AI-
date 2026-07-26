@@ -191,6 +191,55 @@ def test_candidate_research_response_keeps_valid_entries_alongside_invalid_ones(
     assert profile.positions == {"housing_zoning_density": 4}
 
 
+def test_candidate_research_response_skips_non_dict_entry_and_keeps_valid_ones():
+    raw = (
+        '{"positions": ['
+        'null, "not a dict", ["also", "not", "a", "dict"], '
+        '{"question_id": "housing_zoning_density", "position": 4, "confidence": "high", '
+        '"source": {"url": "https://example.com/valid"}}'
+        ']}'
+    )
+    profile = parse_candidate_research_response("Jane Doe", "mayor", raw)
+    assert profile.positions == {"housing_zoning_density": 4}
+
+
+def test_candidate_research_response_skips_duplicate_question_id():
+    raw = (
+        '{"positions": ['
+        '{"question_id": "housing_zoning_density", "position": 4, "confidence": "high", '
+        '"source": {"url": "https://example.com/first"}},'
+        '{"question_id": "housing_zoning_density", "position": 1, "confidence": "low", '
+        '"source": {"url": "https://example.com/second"}}'
+        ']}'
+    )
+    profile = parse_candidate_research_response("Jane Doe", "mayor", raw)
+    assert profile.positions == {"housing_zoning_density": 4}
+    assert len(profile.sourced_positions) == 1
+
+
+def test_candidate_research_response_rejects_boolean_position():
+    raw = (
+        '{"positions": [{"question_id": "housing_zoning_density", "position": true, '
+        '"confidence": "high", "source": {"url": "https://example.com"}}]}'
+    )
+    profile = parse_candidate_research_response("Jane Doe", "mayor", raw)
+    assert profile.positions == {}
+
+
+def test_candidate_research_response_rejects_non_http_url():
+    raw = (
+        '{"positions": [{"question_id": "housing_zoning_density", "position": 4, '
+        '"confidence": "high", "source": {"url": "javascript:alert(1)"}}]}'
+    )
+    profile = parse_candidate_research_response("Jane Doe", "mayor", raw)
+    assert profile.positions == {}
+
+
+def test_candidate_research_response_raises_on_non_dict_top_level():
+    with pytest.raises(ValueError):
+        parse_candidate_research_response("Jane Doe", "mayor", '"positions"')
+
+
 def test_candidate_issue_profile_covered_categories():
     profile = CandidateIssueProfile(
         candidate_name="Jane Doe",

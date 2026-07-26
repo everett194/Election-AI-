@@ -327,24 +327,31 @@ def _render_candidate_comparison(
                     "none overlap with the questions you answered.)"
                 )
 
-            covered_categories = profile.covered_categories()
-            missing_categories = [
-                CATEGORY_LABELS[category]
-                for category in CATEGORY_LABELS
-                if category not in covered_categories
-            ]
-            if missing_categories:
-                st.caption(
-                    "No sourced positions for: " + ", ".join(missing_categories) +
-                    " -- not shown on the radar chart."
-                )
+            if is_mapped:
+                covered_categories = set(compatibility["by_category"].keys())
+                missing_categories = [
+                    CATEGORY_LABELS[category]
+                    for category in CATEGORY_LABELS
+                    if category not in covered_categories
+                ]
+                if missing_categories:
+                    st.caption(
+                        "No sourced positions for: " + ", ".join(missing_categories) +
+                        " -- not shown on the radar chart."
+                    )
 
-            has_econ, has_social = profile.covered_axes()
-            if not (has_econ and has_social):
-                missing_axis = "economic" if not has_econ else "social"
-                st.caption(
-                    f"Not plotted on the compass -- no sourced positions cover the {missing_axis} axis."
-                )
+                has_econ, has_social = profile.covered_axes()
+                if not (has_econ and has_social):
+                    missing_axes = [
+                        axis
+                        for axis, covered in (("economic", has_econ), ("social", has_social))
+                        if not covered
+                    ]
+                    st.caption(
+                        "Not plotted on the compass -- no sourced positions cover the "
+                        + " or ".join(missing_axes)
+                        + " axis" + ("es" if len(missing_axes) > 1 else "") + "."
+                    )
 
             with st.expander(f"Sourced positions for {candidate.name}"):
                 for sourced in profile.sourced_positions:

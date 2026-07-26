@@ -149,19 +149,28 @@ def parse_candidate_research_response(
     except json.JSONDecodeError as exc:
         raise ValueError(f"Model response was not valid JSON: {exc}") from exc
 
-    if "positions" not in data or not isinstance(data["positions"], list):
+    if not isinstance(data, dict) or "positions" not in data or not isinstance(data["positions"], list):
         raise ValueError("Model response JSON is missing a 'positions' array")
 
     sourced_positions: list[CandidateIssuePosition] = []
     positions_by_id: dict[str, int] = {}
     for pos_data in data["positions"]:
+        if not isinstance(pos_data, dict):
+            continue
         question_id = pos_data.get("question_id")
-        if question_id not in QUESTIONS_BY_ID:
+        if not isinstance(question_id, str) or question_id not in QUESTIONS_BY_ID:
             # Unknown/missing id -- skip rather than fail the whole response.
             continue
 
+        if question_id in positions_by_id:
+            continue
+
         position_value = pos_data.get("position")
-        if not isinstance(position_value, int) or not (1 <= position_value <= 5):
+        if (
+            not isinstance(position_value, int)
+            or isinstance(position_value, bool)
+            or not (1 <= position_value <= 5)
+        ):
             continue
 
         confidence = pos_data.get("confidence")
@@ -169,14 +178,17 @@ def parse_candidate_research_response(
             continue
 
         source_data = pos_data.get("source")
-        if not isinstance(source_data, dict) or not source_data.get("url"):
+        if not isinstance(source_data, dict):
+            continue
+        url = source_data.get("url")
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
             continue
 
         position = CandidateIssuePosition(
             question_id=question_id,
             position=position_value,
             confidence=confidence,
-            source=Source(url=source_data["url"], title=source_data.get("title")),
+            source=Source(url=url, title=source_data.get("title")),
         )
         sourced_positions.append(position)
         positions_by_id[question_id] = position.position
