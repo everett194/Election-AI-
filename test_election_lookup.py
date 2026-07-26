@@ -141,6 +141,90 @@ def test_candidate_research_response_ignores_unknown_question_ids():
     assert profile.sourced_positions == []
 
 
+def test_candidate_research_response_skips_entry_with_out_of_range_position():
+    raw = (
+        '{"positions": [{"question_id": "housing_zoning_density", "position": 9, '
+        '"confidence": "high", "source": {"url": "https://example.com"}}]}'
+    )
+    profile = parse_candidate_research_response("Jane Doe", "mayor", raw)
+    assert profile.positions == {}
+    assert profile.sourced_positions == []
+
+
+def test_candidate_research_response_skips_entry_with_non_integer_position():
+    raw = (
+        '{"positions": [{"question_id": "housing_zoning_density", "position": "4", '
+        '"confidence": "high", "source": {"url": "https://example.com"}}]}'
+    )
+    profile = parse_candidate_research_response("Jane Doe", "mayor", raw)
+    assert profile.positions == {}
+
+
+def test_candidate_research_response_skips_entry_with_invalid_confidence():
+    raw = (
+        '{"positions": [{"question_id": "housing_zoning_density", "position": 4, '
+        '"confidence": "very high", "source": {"url": "https://example.com"}}]}'
+    )
+    profile = parse_candidate_research_response("Jane Doe", "mayor", raw)
+    assert profile.positions == {}
+
+
+def test_candidate_research_response_skips_entry_with_missing_source_url():
+    raw = (
+        '{"positions": [{"question_id": "housing_zoning_density", "position": 4, '
+        '"confidence": "high", "source": {"title": "no url here"}}]}'
+    )
+    profile = parse_candidate_research_response("Jane Doe", "mayor", raw)
+    assert profile.positions == {}
+
+
+def test_candidate_research_response_keeps_valid_entries_alongside_invalid_ones():
+    raw = (
+        '{"positions": ['
+        '{"question_id": "housing_zoning_density", "position": 4, "confidence": "high", '
+        '"source": {"url": "https://example.com/valid"}},'
+        '{"question_id": "taxes_shortfall", "position": 9, "confidence": "high", '
+        '"source": {"url": "https://example.com/invalid"}}'
+        ']}'
+    )
+    profile = parse_candidate_research_response("Jane Doe", "mayor", raw)
+    assert profile.positions == {"housing_zoning_density": 4}
+
+
+def test_candidate_issue_profile_covered_categories():
+    profile = CandidateIssueProfile(
+        candidate_name="Jane Doe",
+        office="mayor",
+        positions={"housing_zoning_density": 4, "safety_police_funding": 2},
+    )
+    assert profile.covered_categories() == {"housing", "safety"}
+
+
+def test_candidate_issue_profile_covered_axes_both_covered():
+    # housing_zoning_density has econ_weight=2, social_weight=0
+    # safety_police_funding has econ_weight=0, social_weight=2
+    profile = CandidateIssueProfile(
+        candidate_name="Jane Doe",
+        office="mayor",
+        positions={"housing_zoning_density": 4, "safety_police_funding": 2},
+    )
+    assert profile.covered_axes() == (True, True)
+
+
+def test_candidate_issue_profile_covered_axes_only_econ():
+    profile = CandidateIssueProfile(
+        candidate_name="Jane Doe",
+        office="mayor",
+        positions={"housing_zoning_density": 4},
+    )
+    assert profile.covered_axes() == (True, False)
+
+
+def test_candidate_issue_profile_covered_axes_none_covered():
+    profile = CandidateIssueProfile(candidate_name="Jane Doe", office="mayor", positions={})
+    assert profile.covered_axes() == (False, False)
+
+
 def _mock_response(text: str):
     text_block = MagicMock()
     text_block.type = "text"
@@ -273,6 +357,15 @@ def test_research_candidate_positions_calls_api_with_all_questions_and_context()
     assert captured["kwargs"]["model"] == "claude-sonnet-5"
     assert captured["kwargs"]["output_config"] == {"effort": "low"}
     assert captured["kwargs"]["tools"][0]["max_uses"] == 5
+
+
+def test_research_candidate_positions_includes_zipcode_in_prompt():
+    fake_client = MagicMock()
+    fake_client.messages.create.return_value = _mock_response('{"positions": []}')
+    candidate = Candidate(name="Jane Doe", party=None, incumbent=None, positions=[])
+    research_candidate_positions("62704", "mayor", "Springfield", candidate, client=fake_client)
+    prompt = fake_client.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert "62704" in prompt
 
 
 def test_research_candidate_positions_omits_context_for_candidate_with_no_known_info():

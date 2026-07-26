@@ -50,6 +50,9 @@ class LookupResult:
     retrieved_at: str
 
 
+_VALID_CONFIDENCES = {"high", "medium", "low"}
+
+
 @dataclass
 class CandidateIssuePosition:
     question_id: str
@@ -64,6 +67,18 @@ class CandidateIssueProfile:
     office: Literal["mayor", "county", "us_house"]
     positions: dict[str, int]  # question_id -> 1-5; feeds compute_candidate_compatibility directly
     sourced_positions: list[CandidateIssuePosition] = field(default_factory=list)
+
+    def covered_categories(self) -> set[str]:
+        """Categories with at least one sourced position -- the only categories
+        it is honest to plot this candidate on."""
+        return {QUESTIONS_BY_ID[qid].category for qid in self.positions}
+
+    def covered_axes(self) -> tuple[bool, bool]:
+        """(has_econ_coverage, has_social_coverage) -- whether at least one
+        sourced position has a non-zero weight on that axis."""
+        has_econ = any(QUESTIONS_BY_ID[qid].econ_weight > 0 for qid in self.positions)
+        has_social = any(QUESTIONS_BY_ID[qid].social_weight > 0 for qid in self.positions)
+        return has_econ, has_social
 
 
 def _strip_code_fence(text: str) -> str:
@@ -140,16 +155,27 @@ def parse_candidate_research_response(
     sourced_positions: list[CandidateIssuePosition] = []
     positions_by_id: dict[str, int] = {}
     for pos_data in data["positions"]:
-        question_id = pos_data["question_id"]
+        question_id = pos_data.get("question_id")
         if question_id not in QUESTIONS_BY_ID:
-            # Defensively skip an id the model invented rather than failing
-            # the whole response over one bad entry.
+            # Unknown/missing id -- skip rather than fail the whole response.
             continue
-        source_data = pos_data["source"]
+
+        position_value = pos_data.get("position")
+        if not isinstance(position_value, int) or not (1 <= position_value <= 5):
+            continue
+
+        confidence = pos_data.get("confidence")
+        if confidence not in _VALID_CONFIDENCES:
+            continue
+
+        source_data = pos_data.get("source")
+        if not isinstance(source_data, dict) or not source_data.get("url"):
+            continue
+
         position = CandidateIssuePosition(
             question_id=question_id,
-            position=pos_data["position"],
-            confidence=pos_data["confidence"],
+            position=position_value,
+            confidence=confidence,
             source=Source(url=source_data["url"], title=source_data.get("title")),
         )
         sourced_positions.append(position)
@@ -190,7 +216,7 @@ records, (4) reputable local news coverage of the candidate's platform or forum 
 is enough; this does not need to be exhaustive.
 
 Candidate: {candidate_name}{party_clause}{incumbent_clause}
-Race: {office_description} ({jurisdiction_name})
+Race: {office_description} ({jurisdiction_name}, zip code {zipcode})
 {known_positions_clause}
 For each of the following {question_count} questions, the candidate's position is on a 1-5 scale, \
 where 1 means they fully favor the first approach, 5 means they fully favor the second approach, \
@@ -386,6 +412,7 @@ def research_candidate_positions(
         incumbent_clause=incumbent_clause,
         office_description=OFFICE_DESCRIPTIONS[office],
         jurisdiction_name=jurisdiction_name,
+        zipcode=zipcode,
         known_positions_clause=known_positions_clause,
         question_count=len(QUESTIONS),
         questions_block=_format_questions_block(),

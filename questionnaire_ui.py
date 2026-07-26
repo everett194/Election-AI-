@@ -34,7 +34,7 @@ IMPORTANCE_LABELS = [
 
 CHART_DOMAIN = [-140, 140]
 
-CANDIDATE_COLORS = ["#E45756", "#54A24B", "#F58518", "#B279A2", "#72B7B2"]
+CANDIDATE_COLORS = ["#9D755D", "#54A24B", "#F58518", "#B279A2", "#72B7B2"]
 
 
 def _candidate_cache_key(zipcode: str, office: str, candidate_name: str) -> tuple[str, str, str]:
@@ -67,11 +67,13 @@ def _radar_chart(
     all_series = [("Your priorities", scores_by_category, "#4C78A8")] + list(candidate_series or [])
     polygon_rows: list[dict] = []
     for series_name, scores, _color in all_series:
+        covered_indices = [i for i, category in enumerate(categories) if category in scores]
         points = [
-            to_point(series_name, category, i, scores.get(category, 0.0))
-            for i, category in enumerate(categories)
+            to_point(series_name, categories[i], i, scores[categories[i]])
+            for i in covered_indices
         ]
-        points.append(points[0])
+        if points:
+            points.append(points[0])
         polygon_rows.extend(points)
     polygon_df = pd.DataFrame(polygon_rows)
 
@@ -221,9 +223,13 @@ def render_questionnaire(
             if compatibility["question_count"] == 0:
                 continue
             color = CANDIDATE_COLORS[index % len(CANDIDATE_COLORS)]
-            candidate_series.append((candidate.name, compatibility["by_category"], color))
-            econ, social = compute_compass_scores(profile.positions)
-            candidate_points.append((candidate.name, econ, social, color))
+            candidate_series.append(
+                (f"Compatibility with {candidate.name}", compatibility["by_category"], color)
+            )
+            has_econ, has_social = profile.covered_axes()
+            if has_econ and has_social:
+                econ, social = compute_compass_scores(profile.positions)
+                candidate_points.append((candidate.name, econ, social, color))
 
     col_radar, col_compass = st.columns(2)
     with col_radar:
@@ -256,7 +262,7 @@ def _render_candidate_comparison(
         )
         return
 
-    for candidate in race.candidates:
+    for index, candidate in enumerate(race.candidates):
         key = _candidate_cache_key(from_zip, from_office, candidate.name)
         profile = st.session_state.candidate_profiles.get(key)
         is_mapped = key in st.session_state.mapped_candidates
@@ -268,7 +274,7 @@ def _render_candidate_comparison(
             st.markdown(f"**{header}**")
 
             if profile is None:
-                if st.button(f"Research and map {candidate.name}", key=f"map_{key}"):
+                if st.button(f"Research and map {candidate.name}", key=f"map_{index}_{key}"):
                     with st.status(
                         f"Researching {candidate.name}'s positions on the 20 questions...",
                         expanded=True,
@@ -303,7 +309,7 @@ def _render_candidate_comparison(
             )
 
             toggle_label = "Remove from comparison" if is_mapped else f"Add {candidate.name} to comparison"
-            if st.button(toggle_label, key=f"toggle_{key}"):
+            if st.button(toggle_label, key=f"toggle_{index}_{key}"):
                 if is_mapped:
                     st.session_state.mapped_candidates.discard(key)
                 else:
@@ -319,6 +325,25 @@ def _render_candidate_comparison(
                 st.write(
                     f"({coverage} of {len(QUESTIONS)} questions have sourced evidence, but "
                     "none overlap with the questions you answered.)"
+                )
+
+            covered_categories = profile.covered_categories()
+            missing_categories = [
+                CATEGORY_LABELS[category]
+                for category in CATEGORY_LABELS
+                if category not in covered_categories
+            ]
+            if missing_categories:
+                st.caption(
+                    "No sourced positions for: " + ", ".join(missing_categories) +
+                    " -- not shown on the radar chart."
+                )
+
+            has_econ, has_social = profile.covered_axes()
+            if not (has_econ and has_social):
+                missing_axis = "economic" if not has_econ else "social"
+                st.caption(
+                    f"Not plotted on the compass -- no sourced positions cover the {missing_axis} axis."
                 )
 
             with st.expander(f"Sourced positions for {candidate.name}"):
