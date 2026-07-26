@@ -14,9 +14,12 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+from election_lookup import Race, research_candidate_positions
 from questionnaire_scoring import (
     CATEGORY_LABELS,
     QUESTIONS,
+    QUESTIONS_BY_ID,
+    compute_candidate_compatibility,
     compute_compass_scores,
     compute_radar_scores,
 )
@@ -32,6 +35,10 @@ IMPORTANCE_LABELS = [
 CHART_DOMAIN = [-140, 140]
 
 CANDIDATE_COLORS = ["#E45756", "#54A24B", "#F58518", "#B279A2", "#72B7B2"]
+
+
+def _candidate_cache_key(zipcode: str, office: str, candidate_name: str) -> tuple[str, str, str]:
+    return (zipcode, office, candidate_name)
 
 
 def _radar_chart(
@@ -133,7 +140,11 @@ def _compass_chart(
     return (hline + vline + point).properties(width=420, height=420)
 
 
-def render_questionnaire(from_office: str | None = None, from_zip: str | None = None) -> None:
+def render_questionnaire(
+    from_office: str | None = None,
+    from_zip: str | None = None,
+    race: Race | None = None,
+) -> None:
     """Renders the full questionnaire section inline on the current page."""
     st.divider()
     st.header("Local issues questionnaire")
@@ -180,29 +191,139 @@ def render_questionnaire(from_office: str | None = None, from_zip: str | None = 
         st.session_state.questionnaire_answers = form_answers
         st.session_state.questionnaire_importance = form_importance
 
-    if "questionnaire_answers" in st.session_state:
-        st.subheader("Your results")
-        radar_scores = compute_radar_scores(st.session_state.questionnaire_importance)
-        econ_score, social_score = compute_compass_scores(st.session_state.questionnaire_answers)
+    if "questionnaire_answers" not in st.session_state:
+        return
 
-        col_radar, col_compass = st.columns(2)
-        with col_radar:
-            st.markdown("**What matters most to you**")
-            st.altair_chart(_radar_chart(radar_scores), width="stretch")
-        with col_compass:
-            st.markdown("**Your ideological compass**")
-            st.altair_chart(_compass_chart(econ_score, social_score), width="stretch")
-            st.caption(
-                f"Economic axis: {econ_score:.0f} (negative = more public investment/"
-                f"regulation, positive = markets/private development/lower taxation). "
-                f"Social axis: {social_score:.0f} (negative = more enforcement/authority/"
-                f"centralization, positive = civil liberties/rehabilitation/decentralization)."
+    st.subheader("Your results")
+    radar_scores = compute_radar_scores(st.session_state.questionnaire_importance)
+    econ_score, social_score = compute_compass_scores(st.session_state.questionnaire_answers)
+
+    if "candidate_profiles" not in st.session_state:
+        st.session_state.candidate_profiles = {}
+    if "mapped_candidates" not in st.session_state:
+        st.session_state.mapped_candidates = set()
+
+    candidate_series: list[tuple[str, dict[str, float], str]] = []
+    candidate_points: list[tuple[str, float, float, str]] = []
+    if from_office and from_zip and race:
+        for index, candidate in enumerate(race.candidates):
+            key = _candidate_cache_key(from_zip, from_office, candidate.name)
+            if key not in st.session_state.mapped_candidates:
+                continue
+            profile = st.session_state.candidate_profiles.get(key)
+            if profile is None or not profile.positions:
+                continue
+            compatibility = compute_candidate_compatibility(
+                st.session_state.questionnaire_answers,
+                st.session_state.questionnaire_importance,
+                profile.positions,
             )
+            if compatibility["question_count"] == 0:
+                continue
+            color = CANDIDATE_COLORS[index % len(CANDIDATE_COLORS)]
+            candidate_series.append((candidate.name, compatibility["by_category"], color))
+            econ, social = compute_compass_scores(profile.positions)
+            candidate_points.append((candidate.name, econ, social, color))
 
+    col_radar, col_compass = st.columns(2)
+    with col_radar:
+        st.markdown("**What matters most to you**")
+        st.altair_chart(_radar_chart(radar_scores, candidate_series), width="stretch")
+    with col_compass:
+        st.markdown("**Your ideological compass**")
+        st.altair_chart(_compass_chart(econ_score, social_score, candidate_points), width="stretch")
+        st.caption(
+            f"Economic axis: {econ_score:.0f} (negative = more public investment/"
+            f"regulation, positive = markets/private development/lower taxation). "
+            f"Social axis: {social_score:.0f} (negative = more enforcement/authority/"
+            f"centralization, positive = civil liberties/rehabilitation/decentralization)."
+        )
+
+    _render_candidate_comparison(from_office, from_zip, race)
+
+
+def _render_candidate_comparison(
+    from_office: str | None, from_zip: str | None, race: Race | None
+) -> None:
+    st.subheader("Compare with candidates")
+    if not (from_office and from_zip and race and race.candidates):
         st.info(
             "Candidate compatibility scoring needs candidates' own answers to these same "
             "20 questions from a verified source (official records, direct questionnaire "
             "responses, or clearly sourced campaign statements) -- not a guess drawn from "
-            "general search results. That candidate-side data isn't populated yet, so no "
-            "per-candidate match score is shown here."
+            "general search results. Open this questionnaire from a specific race's "
+            "candidates to compare against them."
         )
+        return
+
+    for candidate in race.candidates:
+        key = _candidate_cache_key(from_zip, from_office, candidate.name)
+        profile = st.session_state.candidate_profiles.get(key)
+        is_mapped = key in st.session_state.mapped_candidates
+
+        with st.container(border=True):
+            header = candidate.name
+            if candidate.party:
+                header += f" ({candidate.party})"
+            st.markdown(f"**{header}**")
+
+            if profile is None:
+                if st.button(f"Research and map {candidate.name}", key=f"map_{key}"):
+                    with st.status(
+                        f"Researching {candidate.name}'s positions on the 20 questions...",
+                        expanded=True,
+                    ) as status:
+                        st.write(
+                            "Searching for real, sourced evidence of this candidate's "
+                            "position on each question. This commonly takes 30-60 seconds."
+                        )
+                        try:
+                            researched = research_candidate_positions(
+                                from_zip, from_office, race.jurisdiction_name, candidate
+                            )
+                        except Exception as exc:
+                            status.update(label="Research failed", state="error")
+                            st.error(f"Research failed: {exc}")
+                        else:
+                            st.session_state.candidate_profiles[key] = researched
+                            st.session_state.mapped_candidates.add(key)
+                            status.update(label="Research complete", state="complete", expanded=False)
+                            st.rerun()
+                continue
+
+            coverage = len(profile.sourced_positions)
+            if coverage == 0:
+                st.write("No sourced positions found for this candidate.")
+                continue
+
+            compatibility = compute_candidate_compatibility(
+                st.session_state.questionnaire_answers,
+                st.session_state.questionnaire_importance,
+                profile.positions,
+            )
+
+            toggle_label = "Remove from comparison" if is_mapped else f"Add {candidate.name} to comparison"
+            if st.button(toggle_label, key=f"toggle_{key}"):
+                if is_mapped:
+                    st.session_state.mapped_candidates.discard(key)
+                else:
+                    st.session_state.mapped_candidates.add(key)
+                st.rerun()
+
+            if compatibility["overall_pct"] is not None:
+                st.write(
+                    f"Overall match: {compatibility['overall_pct']:.0f}% "
+                    f"(based on {coverage} of {len(QUESTIONS)} questions with sourced evidence)"
+                )
+            else:
+                st.write(
+                    f"({coverage} of {len(QUESTIONS)} questions have sourced evidence, but "
+                    "none overlap with the questions you answered.)"
+                )
+
+            with st.expander(f"Sourced positions for {candidate.name}"):
+                for sourced in profile.sourced_positions:
+                    question = QUESTIONS_BY_ID[sourced.question_id]
+                    badge = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(sourced.confidence, "⚪")
+                    st.write(f"{badge} **{question.text}** _(confidence: {sourced.confidence})_")
+                    st.markdown(f"  - [{sourced.source.title or sourced.source.url}]({sourced.source.url})")
