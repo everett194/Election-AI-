@@ -31,27 +31,47 @@ IMPORTANCE_LABELS = [
 
 CHART_DOMAIN = [-140, 140]
 
+CANDIDATE_COLORS = ["#E45756", "#54A24B", "#F58518", "#B279A2", "#72B7B2"]
 
-def _radar_chart(scores_by_category: dict[str, float]) -> alt.LayerChart:
+
+def _radar_chart(
+    scores_by_category: dict[str, float],
+    candidate_series: list[tuple[str, dict[str, float], str]] | None = None,
+) -> alt.LayerChart:
     categories = list(CATEGORY_LABELS.keys())
     angle_step = 2 * math.pi / len(categories)
 
-    def to_point(category: str, index: int, radius: float) -> dict:
+    def to_point(series_name: str, category: str, index: int, radius: float) -> dict:
         angle = -math.pi / 2 + index * angle_step
         return {
+            "series": series_name,
             "category": CATEGORY_LABELS[category],
             "x": radius * math.cos(angle),
             "y": radius * math.sin(angle),
         }
 
-    polygon_points = [
-        to_point(category, i, scores_by_category.get(category, 0.0))
+    voter_points = [
+        to_point("Your priorities", category, i, scores_by_category.get(category, 0.0))
         for i, category in enumerate(categories)
     ]
-    polygon_points.append(polygon_points[0])
-    polygon_df = pd.DataFrame(polygon_points)
+    voter_points.append(voter_points[0])
+    voter_df = pd.DataFrame(voter_points)
 
-    label_points = pd.DataFrame([to_point(c, i, 118) for i, c in enumerate(categories)])
+    all_series = [("Your priorities", scores_by_category, "#4C78A8")] + list(candidate_series or [])
+    polygon_rows: list[dict] = []
+    for series_name, scores, _color in all_series:
+        points = [
+            to_point(series_name, category, i, scores.get(category, 0.0))
+            for i, category in enumerate(categories)
+        ]
+        points.append(points[0])
+        polygon_rows.extend(points)
+    polygon_df = pd.DataFrame(polygon_rows)
+
+    names = [name for name, _scores, _color in all_series]
+    colors = [color for _name, _scores, color in all_series]
+
+    label_points = pd.DataFrame([to_point("labels", c, i, 118) for i, c in enumerate(categories)])
 
     ring_angles = [i * (2 * math.pi / 72) for i in range(73)]
     ring_df = pd.DataFrame(
@@ -60,20 +80,36 @@ def _radar_chart(scores_by_category: dict[str, float]) -> alt.LayerChart:
 
     x_enc = alt.X("x:Q", axis=None, scale=alt.Scale(domain=CHART_DOMAIN))
     y_enc = alt.Y("y:Q", axis=None, scale=alt.Scale(domain=CHART_DOMAIN))
+    color_enc = alt.Color(
+        "series:N",
+        scale=alt.Scale(domain=names, range=colors),
+        legend=alt.Legend(title=None) if candidate_series else None,
+    )
 
     ring = alt.Chart(ring_df).mark_line(color="#cccccc", strokeDash=[2, 2]).encode(x=x_enc, y=y_enc)
-    area = alt.Chart(polygon_df).mark_area(opacity=0.3, color="#4C78A8").encode(x=x_enc, y=y_enc)
-    line = alt.Chart(polygon_df).mark_line(color="#4C78A8").encode(x=x_enc, y=y_enc)
-    points = alt.Chart(polygon_df).mark_point(color="#4C78A8", filled=True).encode(
-        x=x_enc, y=y_enc, tooltip=["category:N"]
+    area = alt.Chart(voter_df).mark_area(opacity=0.25, color="#4C78A8").encode(x=x_enc, y=y_enc)
+    line = alt.Chart(polygon_df).mark_line().encode(x=x_enc, y=y_enc, color=color_enc)
+    points = alt.Chart(polygon_df).mark_point(filled=True).encode(
+        x=x_enc, y=y_enc, color=color_enc, tooltip=["series:N", "category:N"]
     )
     labels = alt.Chart(label_points).mark_text(fontSize=11).encode(x=x_enc, y=y_enc, text="category:N")
 
     return (ring + area + line + points + labels).properties(width=420, height=420)
 
 
-def _compass_chart(econ_score: float, social_score: float) -> alt.LayerChart:
-    point_df = pd.DataFrame([{"econ": econ_score, "social": social_score}])
+def _compass_chart(
+    econ_score: float,
+    social_score: float,
+    candidate_points: list[tuple[str, float, float, str]] | None = None,
+) -> alt.LayerChart:
+    rows = [{"series": "You", "econ": econ_score, "social": social_score}]
+    colors = ["#E45756"]
+    for name, econ, social, color in candidate_points or []:
+        rows.append({"series": name, "econ": econ, "social": social})
+        colors.append(color)
+    point_df = pd.DataFrame(rows)
+    names = [row["series"] for row in rows]
+
     x_enc = alt.X(
         "econ:Q",
         scale=alt.Scale(domain=[-110, 110]),
@@ -84,10 +120,15 @@ def _compass_chart(econ_score: float, social_score: float) -> alt.LayerChart:
         scale=alt.Scale(domain=[-110, 110]),
         title="Social axis (enforcement/centralized <-> civil liberties/decentralized)",
     )
+    color_enc = alt.Color(
+        "series:N",
+        scale=alt.Scale(domain=names, range=colors),
+        legend=alt.Legend(title=None) if candidate_points else None,
+    )
     hline = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="#cccccc").encode(y="y:Q")
     vline = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(color="#cccccc").encode(x="x:Q")
-    point = alt.Chart(point_df).mark_point(size=200, filled=True, color="#E45756").encode(
-        x=x_enc, y=y_enc
+    point = alt.Chart(point_df).mark_point(size=200, filled=True).encode(
+        x=x_enc, y=y_enc, color=color_enc, tooltip=["series:N"]
     )
     return (hline + vline + point).properties(width=420, height=420)
 
