@@ -5,11 +5,13 @@ import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Iterator, Literal
+from typing import Callable, Iterator, Literal, TypeVar
 
 import anthropic
 
 from questionnaire_scoring import QUESTIONS, QUESTIONS_BY_ID
+
+_T = TypeVar("_T")
 
 
 @dataclass
@@ -278,10 +280,16 @@ race of this type exists, or the jurisdiction doesn't have one (e.g. no elected 
 say so with a note explaining why and an empty candidates list.
 
 For each candidate, list their name, party (if known), incumbent status (if known), and \
-1-3 short bullet points on their stated positions or priorities, each with a confidence \
-level ("high", "medium", or "low") and the source URL(s) it came from. Only include a \
-position if you found a real source for it -- never invent or infer one. If you found no \
-documented positions for a candidate, give them an empty positions list.
+1-3 short bullet points about their record, background, and stated positions or priorities. \
+Prefer real, sourced statements when you find them -- mark those "high" or "medium" \
+confidence with the source URL(s) they came from. If you cannot find a specific sourced \
+position on an issue, still give at least one brief, honest line based on whatever you do \
+know (party affiliation, general political alignment, professional background, prior public \
+record, or simply "no public statements found on this candidate's priorities") rather than \
+leaving the candidate blank -- mark that "low" confidence with an empty sources list, and \
+phrase it as an inference, not a fact (e.g. "Likely favors ... based on party affiliation" \
+rather than "Supports ..."). Every candidate should end up with at least one bullet point, \
+even if it is only a low-confidence one.
 
 Respond with ONLY a single JSON object (no markdown fences, no prose before or after) in \
 exactly this shape:
@@ -328,23 +336,54 @@ def _call_model_for_text(
     if response.stop_reason == "refusal":
         raise RuntimeError(f"The search for {refusal_subject} was refused.")
 
-    text_blocks = [block.text for block in response.content if getattr(block, "type", None) == "text"]
+    text_blocks = [
+        block.text
+        for block in response.content
+        if getattr(block, "type", None) == "text" and (block.text or "").strip()
+    ]
     if not text_blocks:
         raise ValueError(f"Model response for {refusal_subject} contained no text output.")
 
     return text_blocks[-1]
 
 
+def _call_model_and_parse(
+    client: "anthropic.Anthropic",
+    prompt: str,
+    max_tokens: int,
+    refusal_subject: str,
+    parse: "Callable[[str], _T]",
+) -> "_T":
+    """Calls the model and parses its response, retrying once if the first
+    attempt produced no usable text or text that wasn't valid JSON --
+    occasional malformed output from a single model call is common enough
+    that one retry meaningfully improves reliability without an open-ended
+    retry loop.
+    """
+    last_error: ValueError | None = None
+    for _ in range(2):
+        try:
+            text = _call_model_for_text(client, prompt, max_tokens, refusal_subject)
+            return parse(text)
+        except ValueError as exc:
+            last_error = exc
+    raise last_error
+
+
 def _search_one_office(zipcode: str, office: str, client: "anthropic.Anthropic") -> Race:
     prompt = SINGLE_OFFICE_PROMPT_TEMPLATE.format(
         zipcode=zipcode, office=office, office_description=OFFICE_DESCRIPTIONS[office]
     )
-    text = _call_model_for_text(client, prompt, max_tokens=3000, refusal_subject=f"the {office} race")
 
-    result = parse_lookup_response(zipcode, text)
-    if not result.races:
-        raise ValueError(f"Model response for the {office} race did not include a race.")
-    return result.races[0]
+    def parse(text: str) -> Race:
+        result = parse_lookup_response(zipcode, text)
+        if not result.races:
+            raise ValueError(f"Model response for the {office} race did not include a race.")
+        return result.races[0]
+
+    return _call_model_and_parse(
+        client, prompt, max_tokens=3000, refusal_subject=f"the {office} race", parse=parse
+    )
 
 
 def iter_local_elections(
@@ -430,8 +469,9 @@ def research_candidate_positions(
         questions_block=_format_questions_block(),
     )
 
-    text = _call_model_for_text(
-        client, prompt, max_tokens=4000, refusal_subject=f"{candidate.name}'s positions"
-    )
+    def parse(text: str) -> CandidateIssueProfile:
+        return parse_candidate_research_response(candidate.name, office, text)
 
-    return parse_candidate_research_response(candidate.name, office, text)
+    return _call_model_and_parse(
+        client, prompt, max_tokens=4000, refusal_subject=f"{candidate.name}'s positions", parse=parse
+    )

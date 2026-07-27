@@ -36,14 +36,21 @@ CHART_DOMAIN = [-140, 140]
 
 CANDIDATE_COLORS = ["#9D755D", "#54A24B", "#F58518", "#B279A2", "#72B7B2"]
 
+OFFICE_LABELS = {
+    "mayor": "Mayoral",
+    "county": "County",
+    "us_house": "U.S. House",
+}
+
 
 def _candidate_cache_key(zipcode: str, office: str, candidate_name: str) -> tuple[str, str, str]:
     return (zipcode, office, candidate_name)
 
 
-def _auto_research_candidates(from_office: str | None, from_zip: str | None, race: Race | None) -> None:
-    """Automatically research every not-yet-researched candidate in `race` and
-    cache the results, so the voter doesn't have to trigger it per candidate.
+def _auto_research_candidates(from_zip: str | None, races: list[Race] | None) -> None:
+    """Automatically research every not-yet-researched candidate across all
+    races found for this zip code, and cache the results, so the voter
+    doesn't have to trigger it per candidate.
 
     Each candidate's result is committed to session state immediately after
     its search returns, with no other Streamlit call in between -- so
@@ -51,13 +58,14 @@ def _auto_research_candidates(from_office: str | None, from_zip: str | None, rac
     never loses an already-completed candidate's result. The next rerun
     just resumes with whatever candidates are still missing a profile.
     """
-    if not (from_office and from_zip and race and race.candidates):
+    if not (from_zip and races):
         return
 
     pending = [
-        candidate
+        (race, candidate)
+        for race in races
         for candidate in race.candidates
-        if _candidate_cache_key(from_zip, from_office, candidate.name)
+        if _candidate_cache_key(from_zip, race.office, candidate.name)
         not in st.session_state.candidate_profiles
     ]
     if not pending:
@@ -68,18 +76,19 @@ def _auto_research_candidates(from_office: str | None, from_zip: str | None, rac
         expanded=True,
     ) as status:
         st.write(
-            "Running one real search per candidate, one at a time. This "
-            "commonly takes 30-60 seconds per candidate."
+            "Running one real search per candidate, across every race found for "
+            "this zip code, one at a time. This commonly takes 30-60 seconds per "
+            "candidate."
         )
-        for candidate in pending:
-            key = _candidate_cache_key(from_zip, from_office, candidate.name)
+        for race, candidate in pending:
+            key = _candidate_cache_key(from_zip, race.office, candidate.name)
             try:
                 researched = research_candidate_positions(
-                    from_zip, from_office, race.jurisdiction_name, candidate
+                    from_zip, race.office, race.jurisdiction_name, candidate
                 )
             except Exception as exc:
                 st.session_state.candidate_profiles[key] = CandidateIssueProfile(
-                    candidate_name=candidate.name, office=from_office, positions={}, sourced_positions=[]
+                    candidate_name=candidate.name, office=race.office, positions={}, sourced_positions=[]
                 )
                 status.write(f"Could not research {candidate.name}: {exc}")
             else:
@@ -193,7 +202,7 @@ def _compass_chart(
 def render_questionnaire(
     from_office: str | None = None,
     from_zip: str | None = None,
-    race: Race | None = None,
+    races: list[Race] | None = None,
 ) -> None:
     """Renders the full questionnaire section inline on the current page."""
     st.divider()
@@ -249,7 +258,7 @@ def render_questionnaire(
     if "mapped_candidates" not in st.session_state:
         st.session_state.mapped_candidates = set()
 
-    _auto_research_candidates(from_office, from_zip, race)
+    _auto_research_candidates(from_zip, races)
 
     st.subheader("Your results")
     radar_scores = compute_radar_scores(st.session_state.questionnaire_importance)
@@ -257,29 +266,37 @@ def render_questionnaire(
 
     candidate_series: list[tuple[str, dict[str, float], str]] = []
     candidate_points: list[tuple[str, float, float, str]] = []
-    if from_office and from_zip and race:
-        for index, candidate in enumerate(race.candidates):
-            key = _candidate_cache_key(from_zip, from_office, candidate.name)
-            if key not in st.session_state.mapped_candidates:
-                continue
-            profile = st.session_state.candidate_profiles.get(key)
-            if profile is None or not profile.positions:
-                continue
-            compatibility = compute_candidate_compatibility(
-                st.session_state.questionnaire_answers,
-                st.session_state.questionnaire_importance,
-                profile.positions,
-            )
-            if compatibility["question_count"] == 0:
-                continue
-            color = CANDIDATE_COLORS[index % len(CANDIDATE_COLORS)]
-            candidate_series.append(
-                (f"Compatibility with {candidate.name}", compatibility["by_category"], color)
-            )
-            has_econ, has_social = profile.covered_axes()
-            if has_econ and has_social:
-                econ, social = compute_compass_scores(profile.positions)
-                candidate_points.append((candidate.name, econ, social, color))
+    if from_zip and races:
+        color_index = 0
+        for race in races:
+            for candidate in race.candidates:
+                key = _candidate_cache_key(from_zip, race.office, candidate.name)
+                if key not in st.session_state.mapped_candidates:
+                    continue
+                profile = st.session_state.candidate_profiles.get(key)
+                if profile is None or not profile.positions:
+                    continue
+                compatibility = compute_candidate_compatibility(
+                    st.session_state.questionnaire_answers,
+                    st.session_state.questionnaire_importance,
+                    profile.positions,
+                )
+                if compatibility["question_count"] == 0:
+                    continue
+                color = CANDIDATE_COLORS[color_index % len(CANDIDATE_COLORS)]
+                color_index += 1
+                office_label = OFFICE_LABELS.get(race.office, race.office)
+                candidate_series.append(
+                    (
+                        f"Compatibility with {candidate.name} ({office_label})",
+                        compatibility["by_category"],
+                        color,
+                    )
+                )
+                has_econ, has_social = profile.covered_axes()
+                if has_econ and has_social:
+                    econ, social = compute_compass_scores(profile.positions)
+                    candidate_points.append((f"{candidate.name} ({office_label})", econ, social, color))
 
     col_radar, col_compass = st.columns(2)
     with col_radar:
@@ -295,103 +312,108 @@ def render_questionnaire(
             f"centralization, positive = civil liberties/rehabilitation/decentralization)."
         )
 
-    _render_candidate_comparison(from_office, from_zip, race)
+    _render_candidate_comparison(from_zip, races)
 
 
-def _render_candidate_comparison(
-    from_office: str | None, from_zip: str | None, race: Race | None
-) -> None:
+def _render_candidate_comparison(from_zip: str | None, races: list[Race] | None) -> None:
     st.subheader("Compare with candidates")
-    if not (from_office and from_zip and race and race.candidates):
+    non_empty_races = [race for race in (races or []) if race.candidates]
+    if not (from_zip and non_empty_races):
         st.info(
             "Candidate compatibility scoring needs candidates' own answers to these same "
             "20 questions from a verified source (official records, direct questionnaire "
             "responses, or clearly sourced campaign statements) -- not a guess drawn from "
-            "general search results. Open this questionnaire from a specific race's "
-            "candidates to compare against them."
+            "general search results. No candidates were found for this zip code's races."
         )
         return
 
     st.caption(
-        "Candidates from this race are researched automatically above; use the "
-        "buttons below to control which ones show up on your charts."
+        "Candidates from every race found for this zip code are researched "
+        "automatically above; use the buttons below to control which ones show "
+        "up on your charts."
     )
 
-    for index, candidate in enumerate(race.candidates):
-        key = _candidate_cache_key(from_zip, from_office, candidate.name)
-        profile = st.session_state.candidate_profiles.get(key)
-        is_mapped = key in st.session_state.mapped_candidates
+    for race in non_empty_races:
+        st.markdown(f"#### {OFFICE_LABELS.get(race.office, race.office)}")
+        for index, candidate in enumerate(race.candidates):
+            key = _candidate_cache_key(from_zip, race.office, candidate.name)
+            profile = st.session_state.candidate_profiles.get(key)
+            is_mapped = key in st.session_state.mapped_candidates
 
-        with st.container(border=True):
-            header = candidate.name
-            if candidate.party:
-                header += f" ({candidate.party})"
-            st.markdown(f"**{header}**")
+            with st.container(border=True):
+                header = candidate.name
+                if candidate.party:
+                    header += f" ({candidate.party})"
+                st.markdown(f"**{header}**")
 
-            if profile is None:
-                # Auto-research above always populates this before we get here;
-                # skip defensively rather than crash on an unexpected gap.
-                continue
+                if profile is None:
+                    # Auto-research above always populates this before we get here;
+                    # skip defensively rather than crash on an unexpected gap.
+                    continue
 
-            coverage = len(profile.sourced_positions)
-            if coverage == 0:
-                st.write("No sourced positions found for this candidate.")
-                continue
+                coverage = len(profile.sourced_positions)
+                if coverage == 0:
+                    st.write("No sourced positions found for this candidate.")
+                    continue
 
-            compatibility = compute_candidate_compatibility(
-                st.session_state.questionnaire_answers,
-                st.session_state.questionnaire_importance,
-                profile.positions,
-            )
+                compatibility = compute_candidate_compatibility(
+                    st.session_state.questionnaire_answers,
+                    st.session_state.questionnaire_importance,
+                    profile.positions,
+                )
 
-            toggle_label = "Remove from comparison" if is_mapped else f"Add {candidate.name} to comparison"
-            if st.button(toggle_label, key=f"toggle_{index}_{key}"):
-                if is_mapped:
-                    st.session_state.mapped_candidates.discard(key)
+                toggle_label = (
+                    "Remove from comparison" if is_mapped else f"Add {candidate.name} to comparison"
+                )
+                if st.button(toggle_label, key=f"toggle_{index}_{key}"):
+                    if is_mapped:
+                        st.session_state.mapped_candidates.discard(key)
+                    else:
+                        st.session_state.mapped_candidates.add(key)
+                    st.rerun()
+
+                if compatibility["overall_pct"] is not None:
+                    st.write(
+                        f"Overall match: {compatibility['overall_pct']:.0f}% "
+                        f"(based on {coverage} of {len(QUESTIONS)} questions with sourced evidence)"
+                    )
                 else:
-                    st.session_state.mapped_candidates.add(key)
-                st.rerun()
-
-            if compatibility["overall_pct"] is not None:
-                st.write(
-                    f"Overall match: {compatibility['overall_pct']:.0f}% "
-                    f"(based on {coverage} of {len(QUESTIONS)} questions with sourced evidence)"
-                )
-            else:
-                st.write(
-                    f"({coverage} of {len(QUESTIONS)} questions have sourced evidence, but "
-                    "none overlap with the questions you answered.)"
-                )
-
-            if is_mapped:
-                covered_categories = set(compatibility["by_category"].keys())
-                missing_categories = [
-                    CATEGORY_LABELS[category]
-                    for category in CATEGORY_LABELS
-                    if category not in covered_categories
-                ]
-                if missing_categories:
-                    st.caption(
-                        "No sourced positions for: " + ", ".join(missing_categories) +
-                        " -- not shown on the radar chart."
+                    st.write(
+                        f"({coverage} of {len(QUESTIONS)} questions have sourced evidence, but "
+                        "none overlap with the questions you answered.)"
                     )
 
-                has_econ, has_social = profile.covered_axes()
-                if not (has_econ and has_social):
-                    missing_axes = [
-                        axis
-                        for axis, covered in (("economic", has_econ), ("social", has_social))
-                        if not covered
+                if is_mapped:
+                    covered_categories = set(compatibility["by_category"].keys())
+                    missing_categories = [
+                        CATEGORY_LABELS[category]
+                        for category in CATEGORY_LABELS
+                        if category not in covered_categories
                     ]
-                    st.caption(
-                        "Not plotted on the compass -- no sourced positions cover the "
-                        + " or ".join(missing_axes)
-                        + " axis" + ("es" if len(missing_axes) > 1 else "") + "."
-                    )
+                    if missing_categories:
+                        st.caption(
+                            "No sourced positions for: " + ", ".join(missing_categories) +
+                            " -- not shown on the radar chart."
+                        )
 
-            with st.expander(f"Sourced positions for {candidate.name}"):
-                for sourced in profile.sourced_positions:
-                    question = QUESTIONS_BY_ID[sourced.question_id]
-                    badge = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(sourced.confidence, "⚪")
-                    st.write(f"{badge} **{question.text}** _(confidence: {sourced.confidence})_")
-                    st.markdown(f"  - [{sourced.source.title or sourced.source.url}]({sourced.source.url})")
+                    has_econ, has_social = profile.covered_axes()
+                    if not (has_econ and has_social):
+                        missing_axes = [
+                            axis
+                            for axis, covered in (("economic", has_econ), ("social", has_social))
+                            if not covered
+                        ]
+                        st.caption(
+                            "Not plotted on the compass -- no sourced positions cover the "
+                            + " or ".join(missing_axes)
+                            + " axis" + ("es" if len(missing_axes) > 1 else "") + "."
+                        )
+
+                with st.expander(f"Sourced positions for {candidate.name}"):
+                    for sourced in profile.sourced_positions:
+                        question = QUESTIONS_BY_ID[sourced.question_id]
+                        badge = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(sourced.confidence, "⚪")
+                        st.write(f"{badge} **{question.text}** _(confidence: {sourced.confidence})_")
+                        st.markdown(
+                            f"  - [{sourced.source.title or sourced.source.url}]({sourced.source.url})"
+                        )

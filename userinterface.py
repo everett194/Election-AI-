@@ -166,8 +166,7 @@ if not rendered_live and zipcode in st.session_state.lookup_cache:
 if st.session_state.get("show_questionnaire"):
     from_office = st.session_state.get("questionnaire_from_office")
     from_zip = st.session_state.get("questionnaire_from_zip")
-    race = None
+    races = None
     if from_zip and from_zip in st.session_state.lookup_cache:
-        by_office = {r.office: r for r in st.session_state.lookup_cache[from_zip].races}
-        race = by_office.get(from_office)
-    render_questionnaire(from_office=from_office, from_zip=from_zip, race=race)
+        races = st.session_state.lookup_cache[from_zip].races
+    render_questionnaire(from_office=from_office, from_zip=from_zip, races=races)
