@@ -14,7 +14,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from election_lookup import CandidateIssueProfile, Race, research_candidate_positions
+from election_lookup import CandidateIssueProfile, Race, research_candidates_for_race
 from questionnaire_scoring import (
     CATEGORY_LABELS,
     QUESTIONS,
@@ -47,28 +47,34 @@ def _candidate_cache_key(zipcode: str, office: str, candidate_name: str) -> tupl
     return (zipcode, office, candidate_name)
 
 
-def _auto_research_candidates(from_zip: str | None, races: list[Race] | None) -> None:
-    """Automatically research every not-yet-researched candidate across all
-    races found for this zip code, and cache the results, so the voter
-    doesn't have to trigger it per candidate.
-
-    Each candidate's result is committed to session state immediately after
-    its search returns, with no other Streamlit call in between -- so
-    interrupting one candidate's search (e.g. by clicking something else)
-    never loses an already-completed candidate's result. The next rerun
-    just resumes with whatever candidates are still missing a profile.
-    """
-    if not (from_zip and races):
-        return
-
-    pending = [
-        (race, candidate)
-        for race in races
+def _pending_candidates(from_zip: str, race: Race) -> list:
+    return [
+        candidate
         for candidate in race.candidates
         if _candidate_cache_key(from_zip, race.office, candidate.name)
         not in st.session_state.candidate_profiles
     ]
-    if not pending:
+
+
+def _auto_research_candidates(from_zip: str | None, races: list[Race] | None) -> None:
+    """Automatically research every not-yet-researched candidate across all
+    races found for this zip code, and cache the results, so the voter
+    doesn't have to trigger it per candidate. One search call covers every
+    pending candidate in a race at once (rather than one call per candidate),
+    to keep the total number of sequential searches down to roughly one per
+    race instead of one per candidate.
+
+    Each race's results are committed to session state immediately after its
+    search returns, with no other Streamlit call in between -- so
+    interrupting one race's search (e.g. by clicking something else) never
+    loses an already-completed race's results. The next rerun just resumes
+    with whatever races still have a candidate missing a profile.
+    """
+    if not (from_zip and races):
+        return
+
+    pending_races = [race for race in races if _pending_candidates(from_zip, race)]
+    if not pending_races:
         return
 
     with st.status(
@@ -76,25 +82,34 @@ def _auto_research_candidates(from_zip: str | None, races: list[Race] | None) ->
         expanded=True,
     ) as status:
         st.write(
-            "Running one real search per candidate, across every race found for "
-            "this zip code, one at a time. This commonly takes 30-60 seconds per "
-            "candidate."
+            "Running one real search per race (covering every candidate in "
+            "that race at once), across every race found for this zip code. "
+            "This commonly takes 30-60 seconds per race."
         )
-        for race, candidate in pending:
-            key = _candidate_cache_key(from_zip, race.office, candidate.name)
+        for race in pending_races:
+            candidates = _pending_candidates(from_zip, race)
             try:
-                researched = research_candidate_positions(
-                    from_zip, race.office, race.jurisdiction_name, candidate
+                researched_by_name = research_candidates_for_race(
+                    from_zip, race.office, race.jurisdiction_name, candidates
                 )
             except Exception as exc:
-                st.session_state.candidate_profiles[key] = CandidateIssueProfile(
-                    candidate_name=candidate.name, office=race.office, positions={}, sourced_positions=[]
+                researched_by_name = {}
+                status.write(f"Could not research candidates for the {race.office} race: {exc}")
+
+            for candidate in candidates:
+                key = _candidate_cache_key(from_zip, race.office, candidate.name)
+                profile = researched_by_name.get(candidate.name) or CandidateIssueProfile(
+                    candidate_name=candidate.name,
+                    office=race.office,
+                    positions={},
+                    sourced_positions=[],
                 )
-                status.write(f"Could not research {candidate.name}: {exc}")
-            else:
-                st.session_state.candidate_profiles[key] = researched
-                st.session_state.mapped_candidates.add(key)
-                status.write(f"Researched {candidate.name}.")
+                st.session_state.candidate_profiles[key] = profile
+                if profile.positions:
+                    st.session_state.mapped_candidates.add(key)
+
+            if researched_by_name:
+                status.write(f"Researched {len(candidates)} candidate(s) for the {race.office} race.")
         status.update(label="Candidate research complete", state="complete", expanded=False)
 
 

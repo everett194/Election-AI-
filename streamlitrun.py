@@ -1,13 +1,32 @@
 """
-userinterface.py
+streamlitrun.py
 
-Streamlit front end, single page. Collects a US zip code and looks up the
-next mayoral, county, and U.S. House elections via election_lookup.py. A
-"Take the issues questionnaire" button under each race reveals the 20-question
-questionnaire inline, further down this same page.
+Entry point and Streamlit UI for the whole app. Run with:
+    streamlit run streamlitrun.py
 
-Run with:
-    streamlit run userinterface.py
+Architecture, so the full picture is visible from this one file:
+- streamlitrun.py (this file): the only Streamlit UI. Collects a US zip
+  code, renders the mayoral/county/U.S. House race search results, and
+  hosts the inline questionnaire section.
+- election_lookup.py: all Anthropic API calls for race/candidate research
+  (`web_search` tool), response parsing into typed dataclasses
+  (Race, Candidate, Position, CandidateIssueProfile, ...), and the
+  resumable per-office search generator (`iter_local_elections`).
+- questionnaire_scoring.py: pure scoring logic for the 20-question
+  framework -- no I/O, no Streamlit, no Anthropic calls. Radar/compass/
+  compatibility math and the question bank itself.
+- questionnaire_ui.py: renders the 20-question form, the voter's own
+  radar/compass charts, and the "Compare with candidates" section
+  (triggers election_lookup.research_candidate_positions automatically
+  per candidate, caches results in st.session_state).
+- test_election_lookup.py / test_questionnaire_scoring.py: pytest
+  coverage for the two non-UI modules above (mocked Anthropic client,
+  no real network calls). streamlitrun.py and questionnaire_ui.py have
+  no pytest coverage by convention -- verified via manual/headless
+  Streamlit smoke tests instead.
+
+A "Take the issues questionnaire" button under each race reveals the
+20-question questionnaire inline, further down this same page.
 """
 
 import re

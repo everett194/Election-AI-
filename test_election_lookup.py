@@ -9,8 +9,10 @@ from election_lookup import (
     Position,
     find_local_elections,
     parse_candidate_research_response,
+    parse_candidates_research_response,
     parse_lookup_response,
     research_candidate_positions,
+    research_candidates_for_race,
 )
 from questionnaire_scoring import QUESTIONS
 
@@ -448,3 +450,112 @@ def test_research_candidate_positions_raises_on_refusal():
     candidate = Candidate(name="Jane Doe", party=None, incumbent=None, positions=[])
     with pytest.raises(RuntimeError):
         research_candidate_positions("62704", "mayor", "Springfield", candidate, client=fake_client)
+
+
+CANDIDATES_BATCH_JSON = """
+{
+  "candidates": [
+    {
+      "name": "Jane Doe",
+      "positions": [
+        {"question_id": "housing_zoning_density", "position": 4, "confidence": "high",
+         "source": {"url": "https://example.com/jane-vote411", "title": "Vote411 guide"}}
+      ]
+    },
+    {
+      "name": "John Smith",
+      "positions": [
+        {"question_id": "housing_zoning_density", "position": 1, "confidence": "medium",
+         "source": {"url": "https://example.com/john-news", "title": null}},
+        {"question_id": "taxes_shortfall", "position": 5, "confidence": "high",
+         "source": {"url": "https://example.com/john-vote411", "title": "Vote411 guide"}}
+      ]
+    }
+  ]
+}
+"""
+
+
+def test_parses_candidates_research_response():
+    profiles = parse_candidates_research_response(
+        "mayor", ["Jane Doe", "John Smith"], CANDIDATES_BATCH_JSON
+    )
+    assert set(profiles.keys()) == {"Jane Doe", "John Smith"}
+    assert profiles["Jane Doe"].positions == {"housing_zoning_density": 4}
+    assert profiles["John Smith"].positions == {
+        "housing_zoning_density": 1,
+        "taxes_shortfall": 5,
+    }
+    assert profiles["Jane Doe"].office == "mayor"
+    assert len(profiles["John Smith"].sourced_positions) == 2
+
+
+def test_candidates_research_response_skips_unknown_candidate_name():
+    raw = (
+        '{"candidates": [{"name": "Someone Else", "positions": '
+        '[{"question_id": "housing_zoning_density", "position": 4, "confidence": "high", '
+        '"source": {"url": "https://example.com"}}]}]}'
+    )
+    profiles = parse_candidates_research_response("mayor", ["Jane Doe"], raw)
+    assert profiles == {}
+
+
+def test_candidates_research_response_skips_duplicate_candidate_name():
+    raw = (
+        '{"candidates": ['
+        '{"name": "Jane Doe", "positions": [{"question_id": "housing_zoning_density", '
+        '"position": 4, "confidence": "high", "source": {"url": "https://example.com/first"}}]},'
+        '{"name": "Jane Doe", "positions": [{"question_id": "taxes_shortfall", '
+        '"position": 1, "confidence": "low", "source": {"url": "https://example.com/second"}}]}'
+        ']}'
+    )
+    profiles = parse_candidates_research_response("mayor", ["Jane Doe"], raw)
+    assert profiles["Jane Doe"].positions == {"housing_zoning_density": 4}
+
+
+def test_candidates_research_response_raises_on_missing_candidates_key():
+    with pytest.raises(ValueError):
+        parse_candidates_research_response("mayor", ["Jane Doe"], "{}")
+
+
+def test_candidates_research_response_handles_empty_candidate_list():
+    profiles = parse_candidates_research_response("mayor", [], '{"candidates": []}')
+    assert profiles == {}
+
+
+def test_research_candidates_for_race_returns_empty_dict_for_no_candidates():
+    fake_client = MagicMock()
+    result = research_candidates_for_race("62704", "mayor", "Springfield", [], client=fake_client)
+    assert result == {}
+    fake_client.messages.create.assert_not_called()
+
+
+def test_research_candidates_for_race_makes_one_call_for_all_candidates():
+    fake_client = MagicMock()
+    fake_client.messages.create.return_value = _mock_response(CANDIDATES_BATCH_JSON)
+
+    candidates = [
+        Candidate(name="Jane Doe", party="Independent", incumbent=True, positions=[]),
+        Candidate(name="John Smith", party="Democratic", incumbent=False, positions=[]),
+    ]
+    profiles = research_candidates_for_race("62704", "mayor", "Springfield", candidates, client=fake_client)
+
+    assert fake_client.messages.create.call_count == 1
+    assert set(profiles.keys()) == {"Jane Doe", "John Smith"}
+
+    prompt = fake_client.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert "Jane Doe" in prompt
+    assert "John Smith" in prompt
+    assert "Independent" in prompt
+    assert "incumbent" in prompt.lower()
+    assert "Springfield" in prompt
+    assert "62704" in prompt
+    for question in QUESTIONS:
+        assert question.id in prompt
+
+
+def test_research_candidates_for_race_raises_without_api_key(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    candidates = [Candidate(name="Jane Doe", party=None, incumbent=None, positions=[])]
+    with pytest.raises(RuntimeError):
+        research_candidates_for_race("62704", "mayor", "Springfield", candidates)

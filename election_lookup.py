@@ -142,26 +142,22 @@ def parse_lookup_response(zipcode: str, raw_text: str) -> LookupResult:
     )
 
 
-def parse_candidate_research_response(
-    candidate_name: str, office: str, raw_text: str
-) -> CandidateIssueProfile:
-    cleaned = _strip_code_fence(raw_text)
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Model response was not valid JSON: {exc}") from exc
-
-    if not isinstance(data, dict) or "positions" not in data or not isinstance(data["positions"], list):
-        raise ValueError("Model response JSON is missing a 'positions' array")
-
+def _parse_sourced_positions(
+    positions_data: "list",
+) -> "tuple[dict[str, int], list[CandidateIssuePosition]]":
+    """Validates and converts a raw `positions` JSON array (shared by both the
+    single-candidate and batched-per-race response shapes) into the
+    (question_id -> 1-5, sourced positions list) pair every caller needs.
+    Any entry with a missing/malformed field is skipped rather than failing
+    the whole response over one bad entry.
+    """
     sourced_positions: list[CandidateIssuePosition] = []
     positions_by_id: dict[str, int] = {}
-    for pos_data in data["positions"]:
+    for pos_data in positions_data:
         if not isinstance(pos_data, dict):
             continue
         question_id = pos_data.get("question_id")
         if not isinstance(question_id, str) or question_id not in QUESTIONS_BY_ID:
-            # Unknown/missing id -- skip rather than fail the whole response.
             continue
 
         if question_id in positions_by_id:
@@ -195,12 +191,68 @@ def parse_candidate_research_response(
         sourced_positions.append(position)
         positions_by_id[question_id] = position.position
 
+    return positions_by_id, sourced_positions
+
+
+def parse_candidate_research_response(
+    candidate_name: str, office: str, raw_text: str
+) -> CandidateIssueProfile:
+    cleaned = _strip_code_fence(raw_text)
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Model response was not valid JSON: {exc}") from exc
+
+    if not isinstance(data, dict) or "positions" not in data or not isinstance(data["positions"], list):
+        raise ValueError("Model response JSON is missing a 'positions' array")
+
+    positions_by_id, sourced_positions = _parse_sourced_positions(data["positions"])
+
     return CandidateIssueProfile(
         candidate_name=candidate_name,
         office=office,
         positions=positions_by_id,
         sourced_positions=sourced_positions,
     )
+
+
+def parse_candidates_research_response(
+    office: str, candidate_names: "list[str]", raw_text: str
+) -> "dict[str, CandidateIssueProfile]":
+    """Batched counterpart to parse_candidate_research_response: parses one
+    response covering multiple candidates in the same race. Entries for an
+    unrecognized or duplicate candidate name are skipped rather than failing
+    the whole response.
+    """
+    cleaned = _strip_code_fence(raw_text)
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Model response was not valid JSON: {exc}") from exc
+
+    if not isinstance(data, dict) or "candidates" not in data or not isinstance(data["candidates"], list):
+        raise ValueError("Model response JSON is missing a 'candidates' array")
+
+    valid_names = set(candidate_names)
+    profiles: dict[str, CandidateIssueProfile] = {}
+    for cand_data in data["candidates"]:
+        if not isinstance(cand_data, dict):
+            continue
+        name = cand_data.get("name")
+        if not isinstance(name, str) or name not in valid_names or name in profiles:
+            continue
+        positions_data = cand_data.get("positions")
+        if not isinstance(positions_data, list):
+            continue
+        positions_by_id, sourced_positions = _parse_sourced_positions(positions_data)
+        profiles[name] = CandidateIssueProfile(
+            candidate_name=name,
+            office=office,
+            positions=positions_by_id,
+            sourced_positions=sourced_positions,
+        )
+
+    return profiles
 
 
 MODEL = "claude-sonnet-5"
@@ -253,6 +305,72 @@ this shape, including ONLY the questions you found real evidence for:
   ]
 }}
 """
+
+
+CANDIDATES_RESEARCH_PROMPT_TEMPLATE = """You are researching multiple candidates' positions on a \
+set of local-policy questions, for a nonpartisan voter-education tool. For EACH candidate and EACH \
+question below, only answer it if you find real, checkable evidence of that specific candidate's \
+position -- never invent, infer, or guess based on party affiliation, endorsements, or general \
+reputation. If you find no real source for a question, leave it out entirely for that candidate.
+
+When searching, prioritize sources in this order: (1) each candidate's own direct response to \
+this questionnaire or a near-identical one, (2) established third-party candidate questionnaires \
+such as Vote411 or Ballotpedia's Candidate Connection, (3) official statements or voting/public \
+records, (4) reputable local news coverage of a candidate's platform or forum appearances, \
+(5) a candidate's own campaign materials. Work efficiently -- research all {candidate_count} \
+candidates below in one pass; a handful of well-chosen searches per candidate is enough, this \
+does not need to be exhaustive.
+
+Race: {office_description} ({jurisdiction_name}, zip code {zipcode})
+
+Candidates:
+{candidates_block}
+
+For each of the following {question_count} questions, a candidate's position is on a 1-5 scale, \
+where 1 means they fully favor the first approach, 5 means they fully favor the second approach, \
+and 3 means their position is genuinely mixed/moderate between the two (only use 3 when you have \
+real evidence of a mixed or moderate stance for that specific candidate, not as a default for \
+missing information).
+
+{questions_block}
+
+Respond with ONLY a single JSON object (no markdown fences, no prose before or after) in exactly \
+this shape, with one entry per candidate listed above (using their name exactly as given), \
+including ONLY the questions you found real evidence for:
+
+{{
+  "candidates": [
+    {{
+      "name": "<one of the candidate names above, exactly as given>",
+      "positions": [
+        {{
+          "question_id": "<one of the question ids above>",
+          "position": 1 | 2 | 3 | 4 | 5,
+          "confidence": "high" | "medium" | "low",
+          "source": {{"url": "<string>", "title": "<string or null>"}}
+        }}
+      ]
+    }}
+  ]
+}}
+"""
+
+
+def _format_candidates_block(candidates: "list[Candidate]") -> str:
+    blocks = []
+    for candidate in candidates:
+        party_clause = f", {candidate.party}" if candidate.party else ""
+        incumbent_clause = " (incumbent)" if candidate.incumbent else ""
+        header = f"- {candidate.name}{party_clause}{incumbent_clause}"
+        if candidate.positions:
+            known_lines = "\n".join(
+                f"  - {position.summary} (confidence: {position.confidence})"
+                for position in candidate.positions
+            )
+            blocks.append(f"{header}\n  Already documented, for context:\n{known_lines}")
+        else:
+            blocks.append(header)
+    return "\n".join(blocks)
 
 
 def _format_questions_block() -> str:
@@ -474,4 +592,55 @@ def research_candidate_positions(
 
     return _call_model_and_parse(
         client, prompt, max_tokens=4000, refusal_subject=f"{candidate.name}'s positions", parse=parse
+    )
+
+
+def research_candidates_for_race(
+    zipcode: str,
+    office: str,
+    jurisdiction_name: str,
+    candidates: "list[Candidate]",
+    client: "anthropic.Anthropic | None" = None,
+) -> "dict[str, CandidateIssueProfile]":
+    """Batched counterpart to research_candidate_positions: one search call
+    covering every candidate in a race, instead of one call per candidate.
+    Cuts the number of sequential candidate-research calls from N (one per
+    candidate) down to 1 per race, at the cost of somewhat thinner per-
+    candidate coverage than researching each one individually.
+
+    Returns a dict keyed by candidate name; a candidate absent from the
+    result (e.g. the model found nothing at all for them) should be treated
+    the same as a profile with zero sourced positions.
+    """
+    if not candidates:
+        return {}
+    if client is None:
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY is not set. Set it in your environment before "
+                "searching (e.g. `export ANTHROPIC_API_KEY=sk-ant-...`)."
+            )
+        client = anthropic.Anthropic()
+
+    candidate_names = [candidate.name for candidate in candidates]
+
+    prompt = CANDIDATES_RESEARCH_PROMPT_TEMPLATE.format(
+        candidate_count=len(candidates),
+        office_description=OFFICE_DESCRIPTIONS[office],
+        jurisdiction_name=jurisdiction_name,
+        zipcode=zipcode,
+        candidates_block=_format_candidates_block(candidates),
+        question_count=len(QUESTIONS),
+        questions_block=_format_questions_block(),
+    )
+
+    def parse(text: str) -> "dict[str, CandidateIssueProfile]":
+        return parse_candidates_research_response(office, candidate_names, text)
+
+    return _call_model_and_parse(
+        client,
+        prompt,
+        max_tokens=min(8000, 3000 + 1500 * len(candidates)),
+        refusal_subject=f"candidates in the {office} race",
+        parse=parse,
     )
