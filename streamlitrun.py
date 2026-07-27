@@ -4,26 +4,37 @@ streamlitrun.py
 Entry point and Streamlit UI for the whole app. Run with:
     streamlit run streamlitrun.py
 
+Requires two API keys in the environment (never commit them, never paste
+them into a chat -- export them yourself in your own terminal):
+    export ANTHROPIC_API_KEY=sk-ant-...    # https://console.anthropic.com
+    export TAVILY_API_KEY=tvly-...         # https://tavily.com
+
 Architecture, so the full picture is visible from this one file:
 - streamlitrun.py (this file): the only Streamlit UI. Collects a US zip
   code, renders the mayoral/county/U.S. House race search results, and
   hosts the inline questionnaire section.
 - election_lookup.py: all Anthropic API calls for race/candidate research
   (`web_search` tool), response parsing into typed dataclasses
-  (Race, Candidate, Position, CandidateIssueProfile, ...), and the
-  resumable per-office search generator (`iter_local_elections`).
+  (Race, Candidate, Position, CandidateIssueProfile, ...), the resumable
+  per-office search generator (`iter_local_elections`), and the
+  Tavily-backed evidence pipeline (`research_candidates_via_tavily`) used
+  for candidate-vs-questionnaire mapping.
+- tavily_search.py: thin wrapper around the Tavily search API -- runs
+  several search queries in parallel per candidate (safe here, unlike
+  concurrent Anthropic calls; see git history) and returns real evidence
+  (title/url/content) for election_lookup to hand to Claude.
 - questionnaire_scoring.py: pure scoring logic for the 20-question
-  framework -- no I/O, no Streamlit, no Anthropic calls. Radar/compass/
-  compatibility math and the question bank itself.
+  framework -- no I/O, no Streamlit, no Anthropic/Tavily calls. Radar/
+  compass/compatibility math and the question bank itself.
 - questionnaire_ui.py: renders the 20-question form, the voter's own
   radar/compass charts, and the "Compare with candidates" section
-  (triggers election_lookup.research_candidate_positions automatically
-  per candidate, caches results in st.session_state).
-- test_election_lookup.py / test_questionnaire_scoring.py: pytest
-  coverage for the two non-UI modules above (mocked Anthropic client,
-  no real network calls). streamlitrun.py and questionnaire_ui.py have
-  no pytest coverage by convention -- verified via manual/headless
-  Streamlit smoke tests instead.
+  (triggers election_lookup.research_candidates_via_tavily automatically
+  per race, caches results in st.session_state).
+- test_election_lookup.py / test_questionnaire_scoring.py /
+  test_tavily_search.py: pytest coverage for the non-UI modules above
+  (mocked Anthropic/Tavily clients, no real network calls). streamlitrun.py
+  and questionnaire_ui.py have no pytest coverage by convention -- verified
+  via manual/headless Streamlit smoke tests instead.
 
 A "Take the issues questionnaire" button under each race reveals the
 20-question questionnaire inline, further down this same page.

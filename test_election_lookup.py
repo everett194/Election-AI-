@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from election_lookup import (
@@ -9,13 +9,16 @@ from election_lookup import (
     Position,
     find_local_elections,
     parse_candidate_research_response,
+    parse_candidates_evidence_response,
     parse_candidates_prediction_response,
     parse_candidates_research_response,
     parse_lookup_response,
     predict_candidates_for_race,
     research_candidate_positions,
     research_candidates_for_race,
+    research_candidates_via_tavily,
 )
+from tavily_search import SearchResult
 from questionnaire_scoring import QUESTIONS
 
 
@@ -648,3 +651,124 @@ def test_predict_candidates_for_race_raises_without_api_key(monkeypatch):
     candidates = [Candidate(name="Jane Doe", party=None, incumbent=None, positions=[])]
     with pytest.raises(RuntimeError):
         predict_candidates_for_race("62704", "mayor", "Springfield", candidates)
+
+
+CANDIDATES_EVIDENCE_JSON = """
+{
+  "candidates": [
+    {
+      "name": "Jane Doe",
+      "positions": [
+        {"question_id": "housing_zoning_density", "position": 4,
+         "confidence": "explicit", "source_url": "https://example.com/jane-vote411"},
+        {"question_id": "taxes_shortfall", "position": 2,
+         "confidence": "weak_inference", "source_url": "https://example.com/jane-news"}
+      ]
+    },
+    {
+      "name": "John Smith",
+      "positions": [
+        {"question_id": "housing_zoning_density", "position": 1,
+         "confidence": "strong_inference", "source_url": "https://example.com/john-record"}
+      ]
+    }
+  ]
+}
+"""
+
+
+def test_parses_candidates_evidence_response():
+    profiles = parse_candidates_evidence_response(
+        "mayor", ["Jane Doe", "John Smith"], CANDIDATES_EVIDENCE_JSON
+    )
+    assert set(profiles.keys()) == {"Jane Doe", "John Smith"}
+    assert profiles["Jane Doe"].positions == {"housing_zoning_density": 4, "taxes_shortfall": 2}
+    assert profiles["Jane Doe"].sourced_positions[0].confidence == "explicit"
+    assert profiles["Jane Doe"].sourced_positions[0].source.url == "https://example.com/jane-vote411"
+    assert profiles["John Smith"].sourced_positions[0].confidence == "strong_inference"
+
+
+def test_candidates_evidence_response_rejects_old_confidence_taxonomy():
+    # "high"/"medium"/"low" (the old race-search taxonomy) must not be
+    # silently accepted here -- only the explicit/strong_inference/
+    # weak_inference taxonomy is valid for evidence-based answers.
+    raw = (
+        '{"candidates": [{"name": "Jane Doe", "positions": '
+        '[{"question_id": "housing_zoning_density", "position": 4, '
+        '"confidence": "high", "source_url": "https://example.com"}]}]}'
+    )
+    profiles = parse_candidates_evidence_response("mayor", ["Jane Doe"], raw)
+    assert profiles["Jane Doe"].positions == {}
+
+
+def test_candidates_evidence_response_rejects_non_http_source_url():
+    raw = (
+        '{"candidates": [{"name": "Jane Doe", "positions": '
+        '[{"question_id": "housing_zoning_density", "position": 4, '
+        '"confidence": "explicit", "source_url": "javascript:alert(1)"}]}]}'
+    )
+    profiles = parse_candidates_evidence_response("mayor", ["Jane Doe"], raw)
+    assert profiles["Jane Doe"].positions == {}
+
+
+def test_candidates_evidence_response_raises_on_missing_candidates_key():
+    with pytest.raises(ValueError):
+        parse_candidates_evidence_response("mayor", ["Jane Doe"], "{}")
+
+
+def test_research_candidates_via_tavily_returns_empty_dict_for_no_candidates():
+    fake_client = MagicMock()
+    result = research_candidates_via_tavily("62704", "mayor", "Springfield", [], client=fake_client)
+    assert result == {}
+    fake_client.messages.create.assert_not_called()
+
+
+def test_research_candidates_via_tavily_fetches_evidence_then_synthesizes():
+    fake_client = MagicMock()
+    fake_client.messages.create.return_value = _mock_response(CANDIDATES_EVIDENCE_JSON)
+
+    candidates = [
+        Candidate(name="Jane Doe", party="Independent", incumbent=True, positions=[]),
+        Candidate(name="John Smith", party="Democratic", incumbent=False, positions=[]),
+    ]
+
+    def fake_search_many(queries, max_results_per_query=5, api_key=None):
+        return {
+            query: [SearchResult(title="Result", url="https://example.com/x", content="Some evidence text")]
+            for query in queries
+        }
+
+    with patch("election_lookup.tavily_search.search_many", side_effect=fake_search_many) as mock_search_many:
+        profiles = research_candidates_via_tavily(
+            "62704", "mayor", "Springfield", candidates, client=fake_client
+        )
+
+    assert set(profiles.keys()) == {"Jane Doe", "John Smith"}
+
+    # One Tavily fan-out call covering every candidate's queries at once.
+    assert mock_search_many.call_count == 1
+    searched_queries = mock_search_many.call_args.args[0]
+    assert any("Jane Doe" in q for q in searched_queries)
+    assert any("John Smith" in q for q in searched_queries)
+
+    # Exactly one Claude call (batched per race), without the web_search tool
+    # (evidence was pre-fetched, so Claude doesn't need to search itself).
+    assert fake_client.messages.create.call_count == 1
+    call_kwargs = fake_client.messages.create.call_args.kwargs
+    assert "tools" not in call_kwargs
+
+    prompt = call_kwargs["messages"][0]["content"]
+    assert "Jane Doe" in prompt
+    assert "John Smith" in prompt
+    assert "https://example.com/x" in prompt
+    assert "explicit" in prompt
+    assert "strong_inference" in prompt
+    assert "weak_inference" in prompt
+
+
+def test_research_candidates_via_tavily_raises_without_api_key(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    candidates = [Candidate(name="Jane Doe", party=None, incumbent=None, positions=[])]
+    with patch("election_lookup.tavily_search.search_many", return_value={}):
+        with pytest.raises(RuntimeError):
+            research_candidates_via_tavily("62704", "mayor", "Springfield", candidates)

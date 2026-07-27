@@ -6,9 +6,12 @@ local-election-questionnaire.pdf / questionnaire.md. Called inline from
 streamlitrun.py -- not a separate page. Computes the voter's 7-category
 radar chart and 2-axis ideological compass from their own answers, then
 overlays every candidate found for the zip code using sourced, real-search
-positions (election_lookup.research_candidates_for_race -- one batched
-search per race, trimmed search budget for speed) so the voter gets a
-visual comparison without waiting on one search per candidate.
+positions (election_lookup.research_candidates_via_tavily -- a parallel
+Tavily search fan-out per candidate, then one Claude call per race that
+reads only that evidence, tagging each answer "explicit" / "strong_inference"
+/ "weak_inference" -- never from party/endorsements/demographics alone)
+so the voter gets a visual comparison without waiting on one search per
+candidate.
 """
 
 import math
@@ -17,7 +20,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from election_lookup import CandidateIssueProfile, Race, research_candidates_for_race
+from election_lookup import CandidateIssueProfile, Race, research_candidates_via_tavily
 from questionnaire_scoring import (
     CATEGORY_LABELS,
     QUESTIONS,
@@ -62,9 +65,11 @@ def _pending_candidates(from_zip: str, race: Race) -> list:
 def _auto_research_candidates(from_zip: str | None, races: list[Race] | None) -> None:
     """Automatically research every not-yet-researched candidate across all
     races found for this zip code, and cache the results, so the voter
-    doesn't have to trigger it per candidate. One real, sourced search call
-    covers every pending candidate in a race at once (rather than one call
-    per candidate), with a trimmed search budget so it stays fast.
+    doesn't have to trigger it per candidate. Per race: a parallel Tavily
+    search fan-out gathers real evidence for every candidate in that race,
+    then one Claude call reads only that evidence and answers the 20
+    questions -- fast because Claude isn't running its own search loop, the
+    evidence is already in hand.
 
     Each race's results are committed to session state immediately after its
     search returns, with no other Streamlit call in between -- so
@@ -84,14 +89,14 @@ def _auto_research_candidates(from_zip: str | None, races: list[Race] | None) ->
         expanded=True,
     ) as status:
         st.write(
-            "Running one batched, trimmed-depth search per race (covering "
-            "every candidate in that race at once), across every race found "
-            "for this zip code."
+            "Running a parallel search fan-out per race (covering every "
+            "candidate in that race at once), across every race found for "
+            "this zip code."
         )
         for race in pending_races:
             candidates = _pending_candidates(from_zip, race)
             try:
-                researched_by_name = research_candidates_for_race(
+                researched_by_name = research_candidates_via_tavily(
                     from_zip, race.office, race.jurisdiction_name, candidates
                 )
             except Exception as exc:
@@ -429,8 +434,13 @@ def _render_candidate_comparison(from_zip: str | None, races: list[Race] | None)
                 with st.expander(f"Sourced positions for {candidate.name}"):
                     for sourced in profile.sourced_positions:
                         question = QUESTIONS_BY_ID[sourced.question_id]
-                        badge = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(sourced.confidence, "⚪")
-                        st.write(f"{badge} **{question.text}** _(confidence: {sourced.confidence})_")
+                        badge = {
+                            "explicit": "🟢",
+                            "strong_inference": "🟡",
+                            "weak_inference": "🔴",
+                        }.get(sourced.confidence, "⚪")
+                        confidence_label = sourced.confidence.replace("_", " ")
+                        st.write(f"{badge} **{question.text}** _(confidence: {confidence_label})_")
                         st.markdown(
                             f"  - [{sourced.source.title or sourced.source.url}]({sourced.source.url})"
                         )

@@ -9,6 +9,7 @@ from typing import Callable, Iterator, Literal, TypeVar
 
 import anthropic
 
+import tavily_search
 from questionnaire_scoring import QUESTIONS, QUESTIONS_BY_ID
 
 _T = TypeVar("_T")
@@ -809,6 +810,241 @@ def predict_candidates_for_race(
         prompt,
         max_tokens=min(6000, 2000 + 1000 * len(candidates)),
         refusal_subject=f"candidate estimates for the {office} race",
+        parse=parse,
+        use_web_search=False,
+    )
+
+
+# --- Tavily-backed evidence research -----------------------------------
+#
+# Two-stage pipeline: (1) fan out several search queries per candidate to
+# the Tavily search API in parallel and collect real evidence, (2) one
+# Claude call per race that reads ONLY that evidence and produces a sourced,
+# confidence-tagged answer per question -- never from party affiliation,
+# endorsements, demographics, or absence of information alone. The Claude
+# call skips the web_search tool (use_web_search=False) since the evidence
+# is already gathered, which is what keeps this fast.
+
+_VALID_INFERENCE_LEVELS = {"explicit", "strong_inference", "weak_inference"}
+
+
+def _candidate_search_queries(candidate_name: str, office: str, jurisdiction_name: str) -> "list[str]":
+    office_label = {
+        "mayor": "mayor",
+        "county": "county",
+        "us_house": "U.S. House",
+    }.get(office, office)
+    return [
+        f"{candidate_name} {jurisdiction_name} {office_label} Vote411",
+        f"{candidate_name} {jurisdiction_name} {office_label} Ballotpedia Candidate Connection",
+        f"{candidate_name} {jurisdiction_name} {office_label} official statement voting record",
+        f"{candidate_name} {jurisdiction_name} {office_label} campaign positions priorities",
+    ]
+
+
+def _format_evidence_block(
+    candidate_name: str, results_by_query: "dict[str, list[tavily_search.SearchResult]]"
+) -> str:
+    all_results = tavily_search.dedupe_by_url(
+        [result for results in results_by_query.values() for result in results]
+    )
+    if not all_results:
+        return f"### {candidate_name}\nNo search results found."
+
+    lines = [f"### {candidate_name}"]
+    for result in all_results[:12]:  # cap so the prompt stays a reasonable size
+        snippet = result.content[:600]
+        lines.append(f"- URL: {result.url}\n  Title: {result.title}\n  Excerpt: {snippet}")
+    return "\n".join(lines)
+
+
+CANDIDATE_EVIDENCE_EXTRAPOLATION_PROMPT_TEMPLATE = """You are analyzing pre-gathered web search \
+evidence to determine {candidate_count} candidates' likely positions on a set of local-policy \
+questions, for a nonpartisan voter-education tool. Use ONLY the evidence provided below for each \
+candidate -- do not use outside knowledge, and do not search further.
+
+For each candidate and each question, classify your answer's confidence as exactly one of:
+- "explicit": the evidence contains a direct, specific statement from or about the candidate on \
+this exact question.
+- "strong_inference": the evidence strongly implies a position (e.g. a closely related vote, \
+statement, or documented record) even without an exact direct quote on this precise question.
+- "weak_inference": only a loose or partial signal exists (e.g. a general priority mentioned once, \
+tangential to this specific question).
+
+Do NOT answer a question at all if the only basis would be the candidate's party affiliation \
+alone, an endorsement alone, demographic assumptions, or the simple absence of information -- \
+these are never acceptable evidence on their own. If nothing in the evidence meets at least \
+"weak_inference" for a question, leave that question out entirely for that candidate.
+
+Race: {office_description} ({jurisdiction_name}, zip code {zipcode})
+
+Evidence found for each candidate:
+
+{evidence_block}
+
+For each of the following {question_count} questions, a candidate's position is on a 1-5 scale, \
+where 1 means they fully favor the first approach, 5 means they fully favor the second approach, \
+and 3 means a genuinely mixed/moderate position supported by the evidence.
+
+{questions_block}
+
+Respond with ONLY a single JSON object (no markdown fences, no prose before or after) in exactly \
+this shape, with one entry per candidate listed above (using their name exactly as given), \
+including a question only when the evidence meets at least "weak_inference", and citing the \
+specific URL from the evidence above that supports each answer:
+
+{{
+  "candidates": [
+    {{
+      "name": "<one of the candidate names above, exactly as given>",
+      "positions": [
+        {{
+          "question_id": "<one of the question ids above>",
+          "position": 1 | 2 | 3 | 4 | 5,
+          "confidence": "explicit" | "strong_inference" | "weak_inference",
+          "source_url": "<one of the URLs from the evidence above>"
+        }}
+      ]
+    }}
+  ]
+}}
+"""
+
+
+def _parse_evidence_positions(
+    positions_data: "list",
+) -> "tuple[dict[str, int], list[CandidateIssuePosition]]":
+    positions_by_id: dict[str, int] = {}
+    sourced_positions: list[CandidateIssuePosition] = []
+    for pos_data in positions_data:
+        if not isinstance(pos_data, dict):
+            continue
+        question_id = pos_data.get("question_id")
+        if not isinstance(question_id, str) or question_id not in QUESTIONS_BY_ID:
+            continue
+        if question_id in positions_by_id:
+            continue
+
+        position_value = pos_data.get("position")
+        if (
+            not isinstance(position_value, int)
+            or isinstance(position_value, bool)
+            or not (1 <= position_value <= 5)
+        ):
+            continue
+
+        confidence = pos_data.get("confidence")
+        if confidence not in _VALID_INFERENCE_LEVELS:
+            continue
+
+        source_url = pos_data.get("source_url")
+        if not isinstance(source_url, str) or not source_url.startswith(("http://", "https://")):
+            continue
+
+        sourced_positions.append(
+            CandidateIssuePosition(
+                question_id=question_id,
+                position=position_value,
+                confidence=confidence,
+                source=Source(url=source_url, title=None),
+            )
+        )
+        positions_by_id[question_id] = position_value
+
+    return positions_by_id, sourced_positions
+
+
+def parse_candidates_evidence_response(
+    office: str, candidate_names: "list[str]", raw_text: str
+) -> "dict[str, CandidateIssueProfile]":
+    cleaned = _strip_code_fence(raw_text)
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Model response was not valid JSON: {exc}") from exc
+
+    if not isinstance(data, dict) or "candidates" not in data or not isinstance(data["candidates"], list):
+        raise ValueError("Model response JSON is missing a 'candidates' array")
+
+    valid_names = set(candidate_names)
+    profiles: dict[str, CandidateIssueProfile] = {}
+    for cand_data in data["candidates"]:
+        if not isinstance(cand_data, dict):
+            continue
+        name = cand_data.get("name")
+        if not isinstance(name, str) or name not in valid_names or name in profiles:
+            continue
+        positions_data = cand_data.get("positions")
+        if not isinstance(positions_data, list):
+            continue
+        positions_by_id, sourced_positions = _parse_evidence_positions(positions_data)
+        profiles[name] = CandidateIssueProfile(
+            candidate_name=name, office=office, positions=positions_by_id, sourced_positions=sourced_positions
+        )
+
+    return profiles
+
+
+def research_candidates_via_tavily(
+    zipcode: str,
+    office: str,
+    jurisdiction_name: str,
+    candidates: "list[Candidate]",
+    client: "anthropic.Anthropic | None" = None,
+) -> "dict[str, CandidateIssueProfile]":
+    """Real, sourced candidate research via Tavily search + one Claude
+    synthesis call per race. Faster than research_candidates_for_race
+    because Claude reads pre-fetched evidence directly instead of running
+    its own agentic web_search loop, and the Tavily fan-out itself runs in
+    parallel (safe here -- Tavily is a plain search API, not subject to the
+    Anthropic-call rate-limit issue this project hit with parallel Claude
+    calls; see git history).
+    """
+    if not candidates:
+        return {}
+    if client is None:
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY is not set. Set it in your environment before "
+                "searching (e.g. `export ANTHROPIC_API_KEY=sk-ant-...`)."
+            )
+        client = anthropic.Anthropic()
+
+    queries_by_candidate: dict[str, list[str]] = {
+        candidate.name: _candidate_search_queries(candidate.name, office, jurisdiction_name)
+        for candidate in candidates
+    }
+    all_queries = [query for queries in queries_by_candidate.values() for query in queries]
+    results_by_query = tavily_search.search_many(all_queries, max_results_per_query=4)
+
+    evidence_block = "\n\n".join(
+        _format_evidence_block(
+            candidate.name,
+            {query: results_by_query.get(query, []) for query in queries_by_candidate[candidate.name]},
+        )
+        for candidate in candidates
+    )
+
+    prompt = CANDIDATE_EVIDENCE_EXTRAPOLATION_PROMPT_TEMPLATE.format(
+        candidate_count=len(candidates),
+        office_description=OFFICE_DESCRIPTIONS[office],
+        jurisdiction_name=jurisdiction_name,
+        zipcode=zipcode,
+        evidence_block=evidence_block,
+        question_count=len(QUESTIONS),
+        questions_block=_format_questions_block(),
+    )
+
+    candidate_names = [candidate.name for candidate in candidates]
+
+    def parse(text: str) -> "dict[str, CandidateIssueProfile]":
+        return parse_candidates_evidence_response(office, candidate_names, text)
+
+    return _call_model_and_parse(
+        client,
+        prompt,
+        max_tokens=min(8000, 3000 + 1500 * len(candidates)),
+        refusal_subject=f"candidate evidence analysis for the {office} race",
         parse=parse,
         use_web_search=False,
     )
