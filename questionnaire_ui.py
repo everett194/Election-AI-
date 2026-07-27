@@ -5,13 +5,14 @@ Rendering for the 20-question local-issues questionnaire from
 local-election-questionnaire.pdf / questionnaire.md. Called inline from
 streamlitrun.py -- not a separate page. Computes the voter's 7-category
 radar chart and 2-axis ideological compass from their own answers, then
-overlays every candidate found for the zip code using sourced, real-search
-positions (election_lookup.research_candidates_via_tavily -- a parallel
-Tavily search fan-out per candidate, then one Claude call per race that
-reads only that evidence, tagging each answer "explicit" / "strong_inference"
-/ "weak_inference" -- never from party/endorsements/demographics alone)
-so the voter gets a visual comparison without waiting on one search per
-candidate.
+overlays EVERY candidate found for the zip code so the voter can see where
+they stand relative to all of them, not just one. Candidate positions come
+from election_lookup.research_candidates_for_race_with_fallback: real,
+sourced Tavily-backed research first ("explicit" / "strong_inference" /
+"weak_inference", each with a source link), topped up with a clearly-tagged
+"speculative" (unsourced) guess for whatever questions the real research
+didn't cover -- so a candidate with thin web coverage still gets plotted
+instead of being silently excluded.
 """
 
 import math
@@ -20,7 +21,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from election_lookup import CandidateIssueProfile, Race, research_candidates_via_tavily
+from election_lookup import CandidateIssueProfile, Race, research_candidates_for_race_with_fallback
 from questionnaire_scoring import (
     CATEGORY_LABELS,
     QUESTIONS,
@@ -67,9 +68,12 @@ def _auto_research_candidates(from_zip: str | None, races: list[Race] | None) ->
     races found for this zip code, and cache the results, so the voter
     doesn't have to trigger it per candidate. Per race: a parallel Tavily
     search fan-out gathers real evidence for every candidate in that race,
-    then one Claude call reads only that evidence and answers the 20
-    questions -- fast because Claude isn't running its own search loop, the
-    evidence is already in hand.
+    one Claude call reads only that evidence and answers as much of the 20
+    questions as it can (fast, since Claude isn't running its own search
+    loop), and any candidate still missing questions gets a second,
+    clearly-labeled speculative call to fill the rest -- so every candidate
+    ends up comparable on the charts, not just the ones with strong web
+    coverage.
 
     Each race's results are committed to session state immediately after its
     search returns, with no other Streamlit call in between -- so
@@ -91,12 +95,13 @@ def _auto_research_candidates(from_zip: str | None, races: list[Race] | None) ->
         st.write(
             "Running a parallel search fan-out per race (covering every "
             "candidate in that race at once), across every race found for "
-            "this zip code."
+            "this zip code, then filling any remaining gaps with a clearly "
+            "labeled speculative guess so every candidate is comparable."
         )
         for race in pending_races:
             candidates = _pending_candidates(from_zip, race)
             try:
-                researched_by_name = research_candidates_via_tavily(
+                researched_by_name = research_candidates_for_race_with_fallback(
                     from_zip, race.office, race.jurisdiction_name, candidates
                 )
             except Exception as exc:
@@ -377,6 +382,15 @@ def _render_candidate_comparison(from_zip: str | None, races: list[Race] | None)
                 if coverage == 0:
                     st.write("No sourced positions found for this candidate.")
                     continue
+                speculative_count = sum(
+                    1 for p in profile.sourced_positions if p.confidence == "speculative"
+                )
+                coverage_note = f"{coverage} of {len(QUESTIONS)} questions"
+                if speculative_count:
+                    coverage_note += (
+                        f" -- {coverage - speculative_count} sourced, {speculative_count} unsourced guess"
+                        + ("es" if speculative_count > 1 else "")
+                    )
 
                 compatibility = compute_candidate_compatibility(
                     st.session_state.questionnaire_answers,
@@ -395,15 +409,9 @@ def _render_candidate_comparison(from_zip: str | None, races: list[Race] | None)
                     st.rerun()
 
                 if compatibility["overall_pct"] is not None:
-                    st.write(
-                        f"Overall match: {compatibility['overall_pct']:.0f}% "
-                        f"(based on {coverage} of {len(QUESTIONS)} questions with sourced evidence)"
-                    )
+                    st.write(f"Overall match: {compatibility['overall_pct']:.0f}% (based on {coverage_note})")
                 else:
-                    st.write(
-                        f"({coverage} of {len(QUESTIONS)} questions have sourced evidence, but "
-                        "none overlap with the questions you answered.)"
-                    )
+                    st.write(f"({coverage_note} answered for this candidate, but none overlap with the questions you answered.)")
 
                 if is_mapped:
                     covered_categories = set(compatibility["by_category"].keys())
@@ -438,9 +446,13 @@ def _render_candidate_comparison(from_zip: str | None, races: list[Race] | None)
                             "explicit": "🟢",
                             "strong_inference": "🟡",
                             "weak_inference": "🔴",
+                            "speculative": "⚪",
                         }.get(sourced.confidence, "⚪")
                         confidence_label = sourced.confidence.replace("_", " ")
                         st.write(f"{badge} **{question.text}** _(confidence: {confidence_label})_")
-                        st.markdown(
-                            f"  - [{sourced.source.title or sourced.source.url}]({sourced.source.url})"
-                        )
+                        if sourced.source is not None:
+                            st.markdown(
+                                f"  - [{sourced.source.title or sourced.source.url}]({sourced.source.url})"
+                            )
+                        else:
+                            st.caption("  Unsourced guess -- no real evidence found for this question.")

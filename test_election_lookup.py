@@ -16,6 +16,7 @@ from election_lookup import (
     predict_candidates_for_race,
     research_candidate_positions,
     research_candidates_for_race,
+    research_candidates_for_race_with_fallback,
     research_candidates_via_tavily,
 )
 from tavily_search import SearchResult
@@ -772,3 +773,93 @@ def test_research_candidates_via_tavily_raises_without_api_key(monkeypatch):
     with patch("election_lookup.tavily_search.search_many", return_value={}):
         with pytest.raises(RuntimeError):
             research_candidates_via_tavily("62704", "mayor", "Springfield", candidates)
+
+
+def _empty_evidence_search_many(queries, max_results_per_query=5, api_key=None):
+    return {query: [] for query in queries}
+
+
+def test_fallback_returns_empty_dict_for_no_candidates():
+    fake_client = MagicMock()
+    result = research_candidates_for_race_with_fallback(
+        "62704", "mayor", "Springfield", [], client=fake_client
+    )
+    assert result == {}
+    fake_client.messages.create.assert_not_called()
+
+
+def test_fallback_fills_gaps_with_speculation_when_sourced_coverage_is_thin():
+    fake_client = MagicMock()
+
+    def fake_create(*args, **kwargs):
+        content = kwargs["messages"][0]["content"]
+        if "analyzing pre-gathered web search" in content:
+            # Real research finds only one sourced position.
+            text = (
+                '{"candidates": [{"name": "Jane Doe", "positions": '
+                '[{"question_id": "housing_zoning_density", "position": 4, '
+                '"confidence": "explicit", "source_url": "https://example.com/jane"}]}]}'
+            )
+        elif "Do not use any tools" in content:
+            # Speculative fallback covers more questions, including the one
+            # already sourced (which must NOT override the sourced answer).
+            text = (
+                '{"candidates": [{"name": "Jane Doe", "positions": ['
+                '{"question_id": "housing_zoning_density", "position": 1}, '
+                '{"question_id": "taxes_shortfall", "position": 3}'
+                ']}]}'
+            )
+        else:
+            raise AssertionError(f"unexpected prompt: {content[:80]!r}")
+        return _mock_response(text)
+
+    fake_client.messages.create.side_effect = fake_create
+
+    candidates = [Candidate(name="Jane Doe", party="Independent", incumbent=True, positions=[])]
+
+    with patch("election_lookup.tavily_search.search_many", side_effect=_empty_evidence_search_many):
+        profiles = research_candidates_for_race_with_fallback(
+            "62704", "mayor", "Springfield", candidates, client=fake_client
+        )
+
+    profile = profiles["Jane Doe"]
+    # Sourced answer wins for the overlapping question.
+    assert profile.positions["housing_zoning_density"] == 4
+    # Speculative fallback fills the gap.
+    assert profile.positions["taxes_shortfall"] == 3
+
+    by_question = {p.question_id: p for p in profile.sourced_positions}
+    assert by_question["housing_zoning_density"].confidence == "explicit"
+    assert by_question["housing_zoning_density"].source.url == "https://example.com/jane"
+    assert by_question["taxes_shortfall"].confidence == "speculative"
+    assert by_question["taxes_shortfall"].source is None
+
+    # Two calls total: one evidence-extrapolation call, one speculative call.
+    assert fake_client.messages.create.call_count == 2
+
+
+def test_fallback_skips_speculation_for_a_fully_sourced_candidate():
+    fake_client = MagicMock()
+    all_questions_json = ",".join(
+        f'{{"question_id": "{q.id}", "position": 3, "confidence": "explicit", '
+        f'"source_url": "https://example.com/{q.id}"}}'
+        for q in QUESTIONS
+    )
+    evidence_text = f'{{"candidates": [{{"name": "Jane Doe", "positions": [{all_questions_json}]}}]}}'
+
+    def fake_create(*args, **kwargs):
+        content = kwargs["messages"][0]["content"]
+        if "analyzing pre-gathered web search" in content:
+            return _mock_response(evidence_text)
+        raise AssertionError("speculation should not be called for a fully-sourced candidate")
+
+    fake_client.messages.create.side_effect = fake_create
+    candidates = [Candidate(name="Jane Doe", party=None, incumbent=None, positions=[])]
+
+    with patch("election_lookup.tavily_search.search_many", side_effect=_empty_evidence_search_many):
+        profiles = research_candidates_for_race_with_fallback(
+            "62704", "mayor", "Springfield", candidates, client=fake_client
+        )
+
+    assert len(profiles["Jane Doe"].positions) == len(QUESTIONS)
+    assert fake_client.messages.create.call_count == 1

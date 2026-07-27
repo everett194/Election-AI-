@@ -60,8 +60,11 @@ _VALID_CONFIDENCES = {"high", "medium", "low"}
 class CandidateIssuePosition:
     question_id: str
     position: int  # 1-5, same scale as the voter's own answers
-    confidence: Literal["high", "medium", "low"]
-    source: Source
+    confidence: str  # one of several taxonomies depending on how this was produced --
+    # "high"/"medium"/"low" (race-search style), "explicit"/"strong_inference"/
+    # "weak_inference" (Tavily evidence-backed), or "speculative" (no source at all,
+    # a fallback guess -- see research_candidates_for_race_with_fallback)
+    source: "Source | None" = None  # None for a speculative (unsourced) position
 
 
 @dataclass
@@ -1048,3 +1051,71 @@ def research_candidates_via_tavily(
         parse=parse,
         use_web_search=False,
     )
+
+
+def research_candidates_for_race_with_fallback(
+    zipcode: str,
+    office: str,
+    jurisdiction_name: str,
+    candidates: "list[Candidate]",
+    client: "anthropic.Anthropic | None" = None,
+) -> "dict[str, CandidateIssueProfile]":
+    """Combines real, sourced research (research_candidates_via_tavily) with
+    a speculative fallback (predict_candidates_for_race) so every candidate
+    ends up with a full or near-full profile and actually shows up on the
+    comparison charts, instead of being silently excluded because local-race
+    web coverage is often thin. A sourced answer always wins over a
+    speculative one for the same question; speculative positions are tagged
+    confidence="speculative" with no source, so the UI can (and does) label
+    them as an unverified guess rather than presenting them as fact.
+
+    Speculation is only requested for candidates whose sourced profile is
+    missing at least one of the 20 questions -- a candidate with full real
+    coverage never gets a speculative call at all.
+    """
+    if not candidates:
+        return {}
+
+    sourced_profiles = research_candidates_via_tavily(zipcode, office, jurisdiction_name, candidates, client)
+
+    needs_speculation = [
+        candidate
+        for candidate in candidates
+        if len(sourced_profiles.get(candidate.name, CandidateIssueProfile(candidate.name, office, {}, [])).positions)
+        < len(QUESTIONS)
+    ]
+    speculative_profiles: dict[str, CandidateIssueProfile] = {}
+    if needs_speculation:
+        speculative_profiles = predict_candidates_for_race(
+            zipcode, office, jurisdiction_name, needs_speculation, client
+        )
+
+    merged: dict[str, CandidateIssueProfile] = {}
+    for candidate in candidates:
+        sourced = sourced_profiles.get(candidate.name)
+        positions: dict[str, int] = dict(sourced.positions) if sourced else {}
+        sourced_positions: list[CandidateIssuePosition] = list(sourced.sourced_positions) if sourced else []
+
+        speculative = speculative_profiles.get(candidate.name)
+        if speculative:
+            for question_id, position_value in speculative.positions.items():
+                if question_id in positions:
+                    continue  # real evidence already covers this question -- keep it
+                positions[question_id] = position_value
+                sourced_positions.append(
+                    CandidateIssuePosition(
+                        question_id=question_id,
+                        position=position_value,
+                        confidence="speculative",
+                        source=None,
+                    )
+                )
+
+        merged[candidate.name] = CandidateIssueProfile(
+            candidate_name=candidate.name,
+            office=office,
+            positions=positions,
+            sourced_positions=sourced_positions,
+        )
+
+    return merged
