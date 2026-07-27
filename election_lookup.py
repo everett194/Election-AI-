@@ -318,8 +318,9 @@ this questionnaire or a near-identical one, (2) established third-party candidat
 such as Vote411 or Ballotpedia's Candidate Connection, (3) official statements or voting/public \
 records, (4) reputable local news coverage of a candidate's platform or forum appearances, \
 (5) a candidate's own campaign materials. Work efficiently -- research all {candidate_count} \
-candidates below in one pass; a handful of well-chosen searches per candidate is enough, this \
-does not need to be exhaustive.
+candidates below in one pass with a small, shared budget of searches total (not per candidate); \
+pick a few of the most likely-to-work searches rather than being exhaustive, and prioritize the \
+highest-signal source tiers above over trying every candidate on every tier.
 
 Race: {office_description} ({jurisdiction_name}, zip code {zipcode})
 
@@ -541,6 +542,7 @@ def _call_model_for_text(
     max_tokens: int,
     refusal_subject: str,
     use_web_search: bool = True,
+    max_uses: int = 5,
 ) -> str:
     kwargs: dict = dict(
         model=MODEL,
@@ -549,7 +551,7 @@ def _call_model_for_text(
         messages=[{"role": "user", "content": prompt}],
     )
     if use_web_search:
-        kwargs["tools"] = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 5}]
+        kwargs["tools"] = [{"type": "web_search_20260209", "name": "web_search", "max_uses": max_uses}]
     response = client.messages.create(**kwargs)
 
     if response.stop_reason == "refusal":
@@ -573,6 +575,7 @@ def _call_model_and_parse(
     refusal_subject: str,
     parse: "Callable[[str], _T]",
     use_web_search: bool = True,
+    max_uses: int = 5,
 ) -> "_T":
     """Calls the model and parses its response, retrying once if the first
     attempt produced no usable text or text that wasn't valid JSON --
@@ -584,7 +587,12 @@ def _call_model_and_parse(
     for _ in range(2):
         try:
             text = _call_model_for_text(
-                client, prompt, max_tokens, refusal_subject, use_web_search=use_web_search
+                client,
+                prompt,
+                max_tokens,
+                refusal_subject,
+                use_web_search=use_web_search,
+                max_uses=max_uses,
             )
             return parse(text)
         except ValueError as exc:
@@ -747,6 +755,7 @@ def research_candidates_for_race(
         max_tokens=min(8000, 3000 + 1500 * len(candidates)),
         refusal_subject=f"candidates in the {office} race",
         parse=parse,
+        max_uses=4,
     )
 
 
