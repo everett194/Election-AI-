@@ -135,29 +135,42 @@ if zipcode in st.session_state.lookup_cache and zipcode not in st.session_state.
     already_found = set(deduped_by_office)
     remaining_offices = tuple(office for office in OFFICES if office not in already_found)
 
-    with st.status(
-        "Searching official sources for mayoral, county, and U.S. House races...",
-        expanded=True,
-    ) as status:
-        st.write(
-            "Running three scoped searches (mayoral, county, U.S. House), one "
-            "at a time. Results appear above as each one finishes; this "
-            "commonly takes a minute or two in total."
-        )
-        try:
-            for race in iter_local_elections(zipcode, offices=remaining_offices):
-                if race.office not in already_found:
-                    result.races.append(race)
-                    already_found.add(race.office)
-                with placeholders[race.office].container():
-                    render_race(race.office, race, zipcode)
-                status.write(f"Found the {progress_labels[race.office]} race.")
-        except Exception as exc:
-            status.update(label="Search failed", state="error")
-            st.error(f"Search failed: {exc}")
-        else:
-            st.session_state.lookup_complete.add(zipcode)
-            status.update(label="Search complete", state="complete", expanded=False)
+    if st.session_state.get("show_questionnaire"):
+        # The voter already clicked "Take the issues questionnaire" under one
+        # of the races rendered above -- don't make them wait for the
+        # remaining offices before it opens. Continuing this search is
+        # deferred rather than resumed automatically; whatever was found
+        # already stays visible.
+        if remaining_offices:
+            remaining_labels = ", ".join(progress_labels[office] for office in remaining_offices)
+            st.caption(
+                f"Skipped finishing the search for: {remaining_labels} -- you "
+                "already moved on to the questionnaire below."
+            )
+    else:
+        with st.status(
+            "Searching official sources for mayoral, county, and U.S. House races...",
+            expanded=True,
+        ) as status:
+            st.write(
+                "Running three scoped searches (mayoral, county, U.S. House), one "
+                "at a time. Results appear above as each one finishes; this "
+                "commonly takes a minute or two in total."
+            )
+            try:
+                for race in iter_local_elections(zipcode, offices=remaining_offices):
+                    if race.office not in already_found:
+                        result.races.append(race)
+                        already_found.add(race.office)
+                    with placeholders[race.office].container():
+                        render_race(race.office, race, zipcode)
+                    status.write(f"Found the {progress_labels[race.office]} race.")
+            except Exception as exc:
+                status.update(label="Search failed", state="error")
+                st.error(f"Search failed: {exc}")
+            else:
+                st.session_state.lookup_complete.add(zipcode)
+                status.update(label="Search complete", state="complete", expanded=False)
     rendered_live = True
 
 if not rendered_live and zipcode in st.session_state.lookup_cache:
