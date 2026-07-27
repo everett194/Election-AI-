@@ -3,9 +3,12 @@ questionnaire_ui.py
 
 Rendering for the 20-question local-issues questionnaire from
 local-election-questionnaire.pdf / questionnaire.md. Called inline from
-userinterface.py -- not a separate page. Computes the voter's 7-category
-radar chart and 2-axis ideological compass from their own answers only; no
-candidate data is invented or inferred here.
+streamlitrun.py -- not a separate page. Computes the voter's 7-category
+radar chart and 2-axis ideological compass from their own answers, then
+overlays every candidate found for the zip code using a fast, unverified
+AI estimate of their likely positions (party/background-based, not sourced
+research -- see election_lookup.predict_candidates_for_race) so the voter
+gets an immediate visual comparison rather than waiting on real research.
 """
 
 import math
@@ -14,7 +17,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from election_lookup import CandidateIssueProfile, Race, research_candidates_for_race
+from election_lookup import CandidateIssueProfile, Race, predict_candidates_for_race
 from questionnaire_scoring import (
     CATEGORY_LABELS,
     QUESTIONS,
@@ -56,19 +59,20 @@ def _pending_candidates(from_zip: str, race: Race) -> list:
     ]
 
 
-def _auto_research_candidates(from_zip: str | None, races: list[Race] | None) -> None:
-    """Automatically research every not-yet-researched candidate across all
-    races found for this zip code, and cache the results, so the voter
-    doesn't have to trigger it per candidate. One search call covers every
-    pending candidate in a race at once (rather than one call per candidate),
-    to keep the total number of sequential searches down to roughly one per
-    race instead of one per candidate.
+def _auto_estimate_candidates(from_zip: str | None, races: list[Race] | None) -> None:
+    """Automatically estimate every not-yet-estimated candidate's likely
+    answers to all 20 questions, across all races found for this zip code,
+    and cache the results, so the voter doesn't have to trigger it per
+    candidate. One fast, non-web-search call covers every pending candidate
+    in a race at once -- this is a quick estimate from the model's own
+    knowledge (party, incumbency, any documented positions), not sourced
+    research, so it's unverified and should be treated as such.
 
     Each race's results are committed to session state immediately after its
-    search returns, with no other Streamlit call in between -- so
-    interrupting one race's search (e.g. by clicking something else) never
-    loses an already-completed race's results. The next rerun just resumes
-    with whatever races still have a candidate missing a profile.
+    call returns, with no other Streamlit call in between -- so interrupting
+    one race's call (e.g. by clicking something else) never loses an
+    already-completed race's results. The next rerun just resumes with
+    whatever races still have a candidate missing a profile.
     """
     if not (from_zip and races):
         return
@@ -78,27 +82,28 @@ def _auto_research_candidates(from_zip: str | None, races: list[Race] | None) ->
         return
 
     with st.status(
-        "Researching candidates' sourced positions on the 20 questions...",
+        "Estimating candidates' likely positions on the 20 questions...",
         expanded=True,
     ) as status:
         st.write(
-            "Running one real search per race (covering every candidate in "
-            "that race at once), across every race found for this zip code. "
-            "This commonly takes 30-60 seconds per race."
+            "Running one fast estimate per race (covering every candidate in "
+            "that race at once, from party/background rather than a live "
+            "search), across every race found for this zip code. This is "
+            "unverified -- treat it as a rough estimate, not a fact."
         )
         for race in pending_races:
             candidates = _pending_candidates(from_zip, race)
             try:
-                researched_by_name = research_candidates_for_race(
+                estimated_by_name = predict_candidates_for_race(
                     from_zip, race.office, race.jurisdiction_name, candidates
                 )
             except Exception as exc:
-                researched_by_name = {}
-                status.write(f"Could not research candidates for the {race.office} race: {exc}")
+                estimated_by_name = {}
+                status.write(f"Could not estimate candidates for the {race.office} race: {exc}")
 
             for candidate in candidates:
                 key = _candidate_cache_key(from_zip, race.office, candidate.name)
-                profile = researched_by_name.get(candidate.name) or CandidateIssueProfile(
+                profile = estimated_by_name.get(candidate.name) or CandidateIssueProfile(
                     candidate_name=candidate.name,
                     office=race.office,
                     positions={},
@@ -108,9 +113,9 @@ def _auto_research_candidates(from_zip: str | None, races: list[Race] | None) ->
                 if profile.positions:
                     st.session_state.mapped_candidates.add(key)
 
-            if researched_by_name:
-                status.write(f"Researched {len(candidates)} candidate(s) for the {race.office} race.")
-        status.update(label="Candidate research complete", state="complete", expanded=False)
+            if estimated_by_name:
+                status.write(f"Estimated {len(candidates)} candidate(s) for the {race.office} race.")
+        status.update(label="Candidate estimates complete", state="complete", expanded=False)
 
 
 def _radar_chart(
@@ -273,7 +278,7 @@ def render_questionnaire(
     if "mapped_candidates" not in st.session_state:
         st.session_state.mapped_candidates = set()
 
-    _auto_research_candidates(from_zip, races)
+    _auto_estimate_candidates(from_zip, races)
 
     st.subheader("Your results")
     radar_scores = compute_radar_scores(st.session_state.questionnaire_importance)
@@ -335,16 +340,15 @@ def _render_candidate_comparison(from_zip: str | None, races: list[Race] | None)
     non_empty_races = [race for race in (races or []) if race.candidates]
     if not (from_zip and non_empty_races):
         st.info(
-            "Candidate compatibility scoring needs candidates' own answers to these same "
-            "20 questions from a verified source (official records, direct questionnaire "
-            "responses, or clearly sourced campaign statements) -- not a guess drawn from "
-            "general search results. No candidates were found for this zip code's races."
+            "No candidates were found for this zip code's races, so there's nothing "
+            "to compare against yet."
         )
         return
 
     st.caption(
-        "Candidates from every race found for this zip code are researched "
-        "automatically above; use the buttons below to control which ones show "
+        "Candidates from every race found for this zip code are estimated "
+        "automatically above -- a fast, unverified guess from party/background, "
+        "not sourced research. Use the buttons below to control which ones show "
         "up on your charts."
     )
 
@@ -366,9 +370,9 @@ def _render_candidate_comparison(from_zip: str | None, races: list[Race] | None)
                     # skip defensively rather than crash on an unexpected gap.
                     continue
 
-                coverage = len(profile.sourced_positions)
+                coverage = len(profile.positions)
                 if coverage == 0:
-                    st.write("No sourced positions found for this candidate.")
+                    st.write("No estimate available for this candidate.")
                     continue
 
                 compatibility = compute_candidate_compatibility(
@@ -389,14 +393,15 @@ def _render_candidate_comparison(from_zip: str | None, races: list[Race] | None)
 
                 if compatibility["overall_pct"] is not None:
                     st.write(
-                        f"Overall match: {compatibility['overall_pct']:.0f}% "
-                        f"(based on {coverage} of {len(QUESTIONS)} questions with sourced evidence)"
+                        f"Estimated match: {compatibility['overall_pct']:.0f}% "
+                        f"(based on {coverage} of {len(QUESTIONS)} estimated questions)"
                     )
                 else:
                     st.write(
-                        f"({coverage} of {len(QUESTIONS)} questions have sourced evidence, but "
-                        "none overlap with the questions you answered.)"
+                        f"({coverage} of {len(QUESTIONS)} questions estimated, but none "
+                        "overlap with the questions you answered.)"
                     )
+                st.caption("Unverified AI estimate, not sourced research.")
 
                 if is_mapped:
                     covered_categories = set(compatibility["by_category"].keys())
@@ -407,7 +412,7 @@ def _render_candidate_comparison(from_zip: str | None, races: list[Race] | None)
                     ]
                     if missing_categories:
                         st.caption(
-                            "No sourced positions for: " + ", ".join(missing_categories) +
+                            "No estimate for: " + ", ".join(missing_categories) +
                             " -- not shown on the radar chart."
                         )
 
@@ -419,16 +424,16 @@ def _render_candidate_comparison(from_zip: str | None, races: list[Race] | None)
                             if not covered
                         ]
                         st.caption(
-                            "Not plotted on the compass -- no sourced positions cover the "
+                            "Not plotted on the compass -- no estimate covers the "
                             + " or ".join(missing_axes)
                             + " axis" + ("es" if len(missing_axes) > 1 else "") + "."
                         )
 
-                with st.expander(f"Sourced positions for {candidate.name}"):
-                    for sourced in profile.sourced_positions:
-                        question = QUESTIONS_BY_ID[sourced.question_id]
-                        badge = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(sourced.confidence, "⚪")
-                        st.write(f"{badge} **{question.text}** _(confidence: {sourced.confidence})_")
-                        st.markdown(
-                            f"  - [{sourced.source.title or sourced.source.url}]({sourced.source.url})"
+                with st.expander(f"Estimated positions for {candidate.name}"):
+                    for question_id, position_value in profile.positions.items():
+                        question = QUESTIONS_BY_ID[question_id]
+                        lean = question.approach_1 if position_value <= 2 else (
+                            question.approach_2 if position_value >= 4 else "Moderate/mixed"
                         )
+                        st.write(f"**{question.text}**")
+                        st.caption(f"Estimated: {position_value}/5 -- {lean}")

@@ -373,6 +373,101 @@ def _format_candidates_block(candidates: "list[Candidate]") -> str:
     return "\n".join(blocks)
 
 
+CANDIDATE_PREDICTION_PROMPT_TEMPLATE = """You are estimating how {candidate_count} candidates in a \
+local race would likely answer a set of local-policy questions, for a nonpartisan voter-education \
+tool. This is a fast ESTIMATE, not verified research -- use your general knowledge of each \
+candidate's party affiliation, incumbency, any positions already documented below, typical \
+positions for candidates of that party/background in similar local races, and your own reasoning. \
+Do not use any tools or search the web; answer from what you already know and can reasonably \
+infer. Every candidate should get an answer for every question below -- if you have no specific \
+information on a candidate, make your best reasonable estimate from party/background rather than \
+skipping it.
+
+Race: {office_description} ({jurisdiction_name}, zip code {zipcode})
+
+Candidates:
+{candidates_block}
+
+For each of the following {question_count} questions, a candidate's position is on a 1-5 scale, \
+where 1 means they fully favor the first approach, 5 means they fully favor the second approach, \
+and 3 means a genuinely moderate or uncertain position.
+
+{questions_block}
+
+Respond with ONLY a single JSON object (no markdown fences, no prose before or after) in exactly \
+this shape, with one entry per candidate listed above (using their name exactly as given) and an \
+estimated answer for every one of the {question_count} questions:
+
+{{
+  "candidates": [
+    {{
+      "name": "<one of the candidate names above, exactly as given>",
+      "positions": [
+        {{"question_id": "<one of the question ids above>", "position": 1 | 2 | 3 | 4 | 5}}
+      ]
+    }}
+  ]
+}}
+"""
+
+
+def _parse_predicted_positions(positions_data: "list") -> "dict[str, int]":
+    positions_by_id: dict[str, int] = {}
+    for pos_data in positions_data:
+        if not isinstance(pos_data, dict):
+            continue
+        question_id = pos_data.get("question_id")
+        if not isinstance(question_id, str) or question_id not in QUESTIONS_BY_ID:
+            continue
+        if question_id in positions_by_id:
+            continue
+        position_value = pos_data.get("position")
+        if (
+            not isinstance(position_value, int)
+            or isinstance(position_value, bool)
+            or not (1 <= position_value <= 5)
+        ):
+            continue
+        positions_by_id[question_id] = position_value
+    return positions_by_id
+
+
+def parse_candidates_prediction_response(
+    office: str, candidate_names: "list[str]", raw_text: str
+) -> "dict[str, CandidateIssueProfile]":
+    """Parses the fast, non-sourced candidate-estimate response into
+    CandidateIssueProfile objects with `sourced_positions=[]` (there are no
+    real sources for an estimate) -- the same return shape as
+    research_candidates_for_race, so callers can use either interchangeably.
+    """
+    cleaned = _strip_code_fence(raw_text)
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Model response was not valid JSON: {exc}") from exc
+
+    if not isinstance(data, dict) or "candidates" not in data or not isinstance(data["candidates"], list):
+        raise ValueError("Model response JSON is missing a 'candidates' array")
+
+    valid_names = set(candidate_names)
+    profiles: dict[str, CandidateIssueProfile] = {}
+    for cand_data in data["candidates"]:
+        if not isinstance(cand_data, dict):
+            continue
+        name = cand_data.get("name")
+        if not isinstance(name, str) or name not in valid_names or name in profiles:
+            continue
+        positions_data = cand_data.get("positions")
+        if not isinstance(positions_data, list):
+            continue
+        positions_by_id = _parse_predicted_positions(positions_data)
+        profiles[name] = CandidateIssueProfile(
+            candidate_name=name, office=office, positions=positions_by_id, sourced_positions=[]
+        )
+
+    return profiles
+
+
 def _format_questions_block() -> str:
     lines = []
     for question in QUESTIONS:
@@ -441,15 +536,21 @@ exactly this shape:
 
 
 def _call_model_for_text(
-    client: "anthropic.Anthropic", prompt: str, max_tokens: int, refusal_subject: str
+    client: "anthropic.Anthropic",
+    prompt: str,
+    max_tokens: int,
+    refusal_subject: str,
+    use_web_search: bool = True,
 ) -> str:
-    response = client.messages.create(
+    kwargs: dict = dict(
         model=MODEL,
         max_tokens=max_tokens,
-        tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 5}],
         output_config={"effort": "low"},
         messages=[{"role": "user", "content": prompt}],
     )
+    if use_web_search:
+        kwargs["tools"] = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 5}]
+    response = client.messages.create(**kwargs)
 
     if response.stop_reason == "refusal":
         raise RuntimeError(f"The search for {refusal_subject} was refused.")
@@ -471,6 +572,7 @@ def _call_model_and_parse(
     max_tokens: int,
     refusal_subject: str,
     parse: "Callable[[str], _T]",
+    use_web_search: bool = True,
 ) -> "_T":
     """Calls the model and parses its response, retrying once if the first
     attempt produced no usable text or text that wasn't valid JSON --
@@ -481,7 +583,9 @@ def _call_model_and_parse(
     last_error: ValueError | None = None
     for _ in range(2):
         try:
-            text = _call_model_for_text(client, prompt, max_tokens, refusal_subject)
+            text = _call_model_for_text(
+                client, prompt, max_tokens, refusal_subject, use_web_search=use_web_search
+            )
             return parse(text)
         except ValueError as exc:
             last_error = exc
@@ -643,4 +747,59 @@ def research_candidates_for_race(
         max_tokens=min(8000, 3000 + 1500 * len(candidates)),
         refusal_subject=f"candidates in the {office} race",
         parse=parse,
+    )
+
+
+def predict_candidates_for_race(
+    zipcode: str,
+    office: str,
+    jurisdiction_name: str,
+    candidates: "list[Candidate]",
+    client: "anthropic.Anthropic | None" = None,
+) -> "dict[str, CandidateIssueProfile]":
+    """Fast, non-web-search estimate of every candidate's likely answers to
+    all 20 questions, from the model's own knowledge and reasoning (party,
+    incumbency, any positions already documented, typical positions for
+    similar candidates) rather than fresh research. Skips the web_search
+    tool entirely, so this is much faster than research_candidates_for_race
+    -- at the direct cost of being an estimate, not a sourced fact. Every
+    returned position is unverified and should be treated as such by
+    callers/UI.
+
+    Same return shape as research_candidates_for_race (dict keyed by
+    candidate name, CandidateIssueProfile with an empty sourced_positions
+    list) so the two are interchangeable for callers.
+    """
+    if not candidates:
+        return {}
+    if client is None:
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY is not set. Set it in your environment before "
+                "searching (e.g. `export ANTHROPIC_API_KEY=sk-ant-...`)."
+            )
+        client = anthropic.Anthropic()
+
+    candidate_names = [candidate.name for candidate in candidates]
+
+    prompt = CANDIDATE_PREDICTION_PROMPT_TEMPLATE.format(
+        candidate_count=len(candidates),
+        office_description=OFFICE_DESCRIPTIONS[office],
+        jurisdiction_name=jurisdiction_name,
+        zipcode=zipcode,
+        candidates_block=_format_candidates_block(candidates),
+        question_count=len(QUESTIONS),
+        questions_block=_format_questions_block(),
+    )
+
+    def parse(text: str) -> "dict[str, CandidateIssueProfile]":
+        return parse_candidates_prediction_response(office, candidate_names, text)
+
+    return _call_model_and_parse(
+        client,
+        prompt,
+        max_tokens=min(6000, 2000 + 1000 * len(candidates)),
+        refusal_subject=f"candidate estimates for the {office} race",
+        parse=parse,
+        use_web_search=False,
     )

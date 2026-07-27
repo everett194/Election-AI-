@@ -9,8 +9,10 @@ from election_lookup import (
     Position,
     find_local_elections,
     parse_candidate_research_response,
+    parse_candidates_prediction_response,
     parse_candidates_research_response,
     parse_lookup_response,
+    predict_candidates_for_race,
     research_candidate_positions,
     research_candidates_for_race,
 )
@@ -559,3 +561,90 @@ def test_research_candidates_for_race_raises_without_api_key(monkeypatch):
     candidates = [Candidate(name="Jane Doe", party=None, incumbent=None, positions=[])]
     with pytest.raises(RuntimeError):
         research_candidates_for_race("62704", "mayor", "Springfield", candidates)
+
+
+CANDIDATES_PREDICTION_JSON = """
+{
+  "candidates": [
+    {
+      "name": "Jane Doe",
+      "positions": [
+        {"question_id": "housing_zoning_density", "position": 4},
+        {"question_id": "taxes_shortfall", "position": 2}
+      ]
+    },
+    {
+      "name": "John Smith",
+      "positions": [
+        {"question_id": "housing_zoning_density", "position": 1}
+      ]
+    }
+  ]
+}
+"""
+
+
+def test_parses_candidates_prediction_response():
+    profiles = parse_candidates_prediction_response(
+        "mayor", ["Jane Doe", "John Smith"], CANDIDATES_PREDICTION_JSON
+    )
+    assert set(profiles.keys()) == {"Jane Doe", "John Smith"}
+    assert profiles["Jane Doe"].positions == {"housing_zoning_density": 4, "taxes_shortfall": 2}
+    assert profiles["Jane Doe"].sourced_positions == []
+    assert profiles["John Smith"].positions == {"housing_zoning_density": 1}
+    assert profiles["Jane Doe"].office == "mayor"
+
+
+def test_candidates_prediction_response_skips_unknown_candidate_name():
+    raw = '{"candidates": [{"name": "Someone Else", "positions": [{"question_id": "housing_zoning_density", "position": 4}]}]}'
+    profiles = parse_candidates_prediction_response("mayor", ["Jane Doe"], raw)
+    assert profiles == {}
+
+
+def test_candidates_prediction_response_rejects_out_of_range_position():
+    raw = '{"candidates": [{"name": "Jane Doe", "positions": [{"question_id": "housing_zoning_density", "position": 9}]}]}'
+    profiles = parse_candidates_prediction_response("mayor", ["Jane Doe"], raw)
+    assert profiles["Jane Doe"].positions == {}
+
+
+def test_candidates_prediction_response_raises_on_missing_candidates_key():
+    with pytest.raises(ValueError):
+        parse_candidates_prediction_response("mayor", ["Jane Doe"], "{}")
+
+
+def test_predict_candidates_for_race_returns_empty_dict_for_no_candidates():
+    fake_client = MagicMock()
+    result = predict_candidates_for_race("62704", "mayor", "Springfield", [], client=fake_client)
+    assert result == {}
+    fake_client.messages.create.assert_not_called()
+
+
+def test_predict_candidates_for_race_skips_web_search_tool():
+    fake_client = MagicMock()
+    fake_client.messages.create.return_value = _mock_response(CANDIDATES_PREDICTION_JSON)
+
+    candidates = [
+        Candidate(name="Jane Doe", party="Independent", incumbent=True, positions=[]),
+        Candidate(name="John Smith", party="Democratic", incumbent=False, positions=[]),
+    ]
+    profiles = predict_candidates_for_race("62704", "mayor", "Springfield", candidates, client=fake_client)
+
+    assert fake_client.messages.create.call_count == 1
+    assert set(profiles.keys()) == {"Jane Doe", "John Smith"}
+
+    call_kwargs = fake_client.messages.create.call_args.kwargs
+    assert "tools" not in call_kwargs
+
+    prompt = call_kwargs["messages"][0]["content"]
+    assert "Jane Doe" in prompt
+    assert "John Smith" in prompt
+    assert "Do not use any tools or search the web" in prompt
+    for question in QUESTIONS:
+        assert question.id in prompt
+
+
+def test_predict_candidates_for_race_raises_without_api_key(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    candidates = [Candidate(name="Jane Doe", party=None, incumbent=None, positions=[])]
+    with pytest.raises(RuntimeError):
+        predict_candidates_for_race("62704", "mayor", "Springfield", candidates)
