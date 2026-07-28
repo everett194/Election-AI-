@@ -112,7 +112,14 @@ def render_result(result: LookupResult) -> None:
         render_race(office, by_office.get(office), result.zipcode)
 
 
-st.title("Election AI - User Interface")
+st.title("VoteLocal")
+st.write(
+    "VoteLocal finds the local elections on your next ballot -- mayor, county, "
+    "and U.S. House -- for any U.S. zip code, researches what's publicly known "
+    "about each candidate's positions, and lets you take a 20-question issues "
+    "questionnaire to see how your own views compare to every candidate running, "
+    "side by side on a radar chart and an ideological compass."
+)
 st.warning(
     "Results are AI-assisted best-effort research from a single automated web "
     "search and are not guaranteed complete or error-free. Verify anything "

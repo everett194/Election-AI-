@@ -190,11 +190,18 @@ def _radar_chart(
     return (ring + area + line + points + labels).properties(width=420, height=420)
 
 
+COMPASS_DOMAIN = [-120, 120]
+
+
 def _compass_chart(
     econ_score: float,
     social_score: float,
     candidate_points: list[tuple[str, float, float, str]] | None = None,
 ) -> alt.LayerChart:
+    """Renders the local political compass. The quadrant shading and the two
+    crosshair axis lines always span the full fixed domain, independent of
+    where any point falls, so the chart always reads as a complete two-axis
+    compass -- never just a lone dot with no visible axes."""
     rows = [{"series": "You", "econ": econ_score, "social": social_score}]
     colors = ["#E45756"]
     for name, econ, social, color in candidate_points or []:
@@ -203,27 +210,87 @@ def _compass_chart(
     point_df = pd.DataFrame(rows)
     names = [row["series"] for row in rows]
 
-    x_enc = alt.X(
-        "econ:Q",
-        scale=alt.Scale(domain=[-110, 110]),
-        title="Economic axis (public investment <-> markets/private)",
-    )
-    y_enc = alt.Y(
-        "social:Q",
-        scale=alt.Scale(domain=[-110, 110]),
-        title="Social axis (enforcement/centralized <-> civil liberties/decentralized)",
-    )
+    lo, hi = COMPASS_DOMAIN
+    x_scale = alt.Scale(domain=COMPASS_DOMAIN)
+    y_scale = alt.Scale(domain=COMPASS_DOMAIN)
+    # Short titles on purpose -- the caption rendered below the chart
+    # already spells out what each pole means, and a longer title here
+    # tends to overflow the narrow half-width column and get clipped.
+    x_title = "Economic axis"
+    y_title = "Social axis"
+
+    # Every layer below encodes its x/y channel on the SAME field names
+    # ("econ"/"social") with the SAME scale and title, so Altair merges them
+    # into one shared axis instead of each layer fighting over its own --
+    # that's what previously made the axis titles/ticks vanish entirely.
+    def x_channel() -> alt.X:
+        return alt.X("econ:Q", scale=x_scale, title=x_title)
+
+    def y_channel() -> alt.Y:
+        return alt.Y("social:Q", scale=y_scale, title=y_title)
+
     color_enc = alt.Color(
         "series:N",
         scale=alt.Scale(domain=names, range=colors),
         legend=alt.Legend(title=None) if candidate_points else None,
     )
-    hline = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="#cccccc").encode(y="y:Q")
-    vline = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(color="#cccccc").encode(x="x:Q")
-    point = alt.Chart(point_df).mark_point(size=200, filled=True).encode(
-        x=x_enc, y=y_enc, color=color_enc, tooltip=["series:N"]
+
+    quadrant_df = pd.DataFrame(
+        [
+            {"econ": lo, "econ2": 0, "social": 0, "social2": hi, "fill": "Public investment + Civil liberties"},
+            {"econ": 0, "econ2": hi, "social": 0, "social2": hi, "fill": "Markets + Civil liberties"},
+            {"econ": lo, "econ2": 0, "social": lo, "social2": 0, "fill": "Public investment + Authority"},
+            {"econ": 0, "econ2": hi, "social": lo, "social2": 0, "fill": "Markets + Authority"},
+        ]
     )
-    return (hline + vline + point).properties(width=420, height=420)
+    quadrant_colors = ["#EAF2FB", "#FBEFEA", "#EAFBF0", "#F7EAFB"]
+    quadrants = (
+        alt.Chart(quadrant_df)
+        .mark_rect(opacity=0.5)
+        .encode(
+            x=x_channel(),
+            x2="econ2:Q",
+            y=y_channel(),
+            y2="social2:Q",
+            color=alt.Color(
+                "fill:N",
+                scale=alt.Scale(domain=quadrant_df["fill"].tolist(), range=quadrant_colors),
+                legend=None,
+            ),
+        )
+    )
+
+    hline = (
+        alt.Chart(pd.DataFrame({"econ": [lo], "econ2": [hi], "social": [0]}))
+        .mark_rule(color="#999999", strokeWidth=1.5)
+        .encode(x=x_channel(), x2="econ2:Q", y=y_channel())
+    )
+    vline = (
+        alt.Chart(pd.DataFrame({"econ": [0], "social": [lo], "social2": [hi]}))
+        .mark_rule(color="#999999", strokeWidth=1.5)
+        .encode(x=x_channel(), y=y_channel(), y2="social2:Q")
+    )
+
+    point = (
+        alt.Chart(point_df)
+        .mark_point(size=240, filled=True, stroke="white", strokeWidth=1.5)
+        .encode(x=x_channel(), y=y_channel(), color=color_enc, tooltip=["series:N", "econ:Q", "social:Q"])
+    )
+
+    # Independent color scale: the quadrant fill and the per-series point
+    # colors would otherwise share one scale/legend, which silences the
+    # point legend entirely (Vega-Lite merges conflicting scales by
+    # disabling the legend rather than picking one).
+    # width="container" (paired with st.altair_chart(..., width="stretch"))
+    # lets Vega-Lite lay out the axis titles at the actual rendered column
+    # width instead of a guessed fixed pixel size, which was clipping the
+    # x-axis title against the narrower column Streamlit gives each chart
+    # in a two-column layout.
+    return (
+        (quadrants + hline + vline + point)
+        .resolve_scale(color="independent")
+        .properties(width="container", height=340)
+    )
 
 
 def render_questionnaire(
@@ -320,10 +387,8 @@ def render_questionnaire(
                         color,
                     )
                 )
-                has_econ, has_social = profile.covered_axes()
-                if has_econ and has_social:
-                    econ, social = compute_compass_scores(profile.positions)
-                    candidate_points.append((f"{candidate.name} ({office_label})", econ, social, color))
+                econ, social = compute_compass_scores(profile.positions)
+                candidate_points.append((f"{candidate.name} ({office_label})", econ, social, color))
 
     col_radar, col_compass = st.columns(2)
     with col_radar:
@@ -424,19 +489,6 @@ def _render_candidate_comparison(from_zip: str | None, races: list[Race] | None)
                         st.caption(
                             "No sourced positions for: " + ", ".join(missing_categories) +
                             " -- not shown on the radar chart."
-                        )
-
-                    has_econ, has_social = profile.covered_axes()
-                    if not (has_econ and has_social):
-                        missing_axes = [
-                            axis
-                            for axis, covered in (("economic", has_econ), ("social", has_social))
-                            if not covered
-                        ]
-                        st.caption(
-                            "Not plotted on the compass -- no sourced positions cover the "
-                            + " or ".join(missing_axes)
-                            + " axis" + ("es" if len(missing_axes) > 1 else "") + "."
                         )
 
                 with st.expander(f"Sourced positions for {candidate.name}"):
