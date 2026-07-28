@@ -2,3 +2,5 @@ streamlit
 anthropic
 requests
 pytest
+fastapi
+uvicorn[standard]

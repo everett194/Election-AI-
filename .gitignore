@@ -4,3 +4,7 @@ __pycache__/
 .env
 .agents/
 .claude/
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
