@@ -48,7 +48,7 @@ def test_search_raises_without_api_key(monkeypatch):
 
 
 def test_search_many_runs_every_query_and_keys_by_query():
-    def fake_search(query, max_results=5, api_key=None):
+    def fake_search(query, max_results=5, api_key=None, search_depth='basic'):
         return [SearchResult(title=query, url=f"https://example.com/{query}", content="text")]
 
     with patch("tavily_search.search", side_effect=fake_search):
@@ -59,7 +59,7 @@ def test_search_many_runs_every_query_and_keys_by_query():
 
 
 def test_search_many_isolates_a_failing_query():
-    def fake_search(query, max_results=5, api_key=None):
+    def fake_search(query, max_results=5, api_key=None, search_depth='basic'):
         if query == "bad query":
             raise RuntimeError("network error")
         return [SearchResult(title=query, url="https://example.com/ok", content="text")]
@@ -73,6 +73,28 @@ def test_search_many_isolates_a_failing_query():
 
 def test_search_many_returns_empty_dict_for_no_queries():
     assert search_many([]) == {}
+
+
+def test_search_many_raises_when_every_query_fails():
+    def fake_search(query, max_results=5, api_key=None, search_depth='basic'):
+        raise RuntimeError("401 Unauthorized")
+
+    with patch("tavily_search.search", side_effect=fake_search):
+        with pytest.raises(RuntimeError, match="failed for all 2 queries"):
+            search_many(["query one", "query two"], api_key="bad-key")
+
+
+def test_search_many_does_not_raise_when_only_some_queries_fail():
+    def fake_search(query, max_results=5, api_key=None, search_depth='basic'):
+        if query == "bad query":
+            raise RuntimeError("network error")
+        return [SearchResult(title=query, url="https://example.com/ok", content="text")]
+
+    with patch("tavily_search.search", side_effect=fake_search):
+        results = search_many(["good query", "bad query"], api_key="test-key")
+
+    assert results["good query"] != []
+    assert results["bad query"] == []
 
 
 def test_dedupe_by_url_keeps_first_occurrence():

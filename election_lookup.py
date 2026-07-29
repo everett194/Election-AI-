@@ -662,6 +662,239 @@ def find_local_elections(zipcode: str, client: "anthropic.Anthropic | None" = No
     )
 
 
+# --- Tavily-backed race discovery ---------------------------------------
+#
+# find_local_elections runs Claude's own agentic web_search tool, sequentially,
+# once per office -- reliable but slow (each call can take up to a few minutes
+# on its own, and there are three of them in a row). find_local_elections_via_tavily
+# trades some of that depth for speed: one parallel Tavily fan-out covering all
+# three race types at once, then a single fast Claude call (no web_search tool)
+# that reads the evidence and returns all three races together.
+
+_RACE_SEARCH_TERMS = {
+    "mayor": "mayor mayoral",
+    "county": "county commissioner OR county council OR county board OR board of supervisors",
+    "us_house": "US House Representative congressional",
+}
+
+
+def _race_search_queries(zipcode: str, office: str, deep: bool = False) -> "list[str]":
+    """3 queries in quick mode (fast fan-out, ~10-15s end to end) -- enough to
+    paint the page immediately. Deep mode runs 11, with Tavily's "advanced"
+    search depth (see find_local_elections_via_tavily), aimed specifically at
+    surfacing a COMPLETE candidate list rather than just the most prominent
+    name. This runs in the background after the page has already loaded, so
+    it's allowed to take longer (~40-60s) in exchange for real thoroughness."""
+    terms = _RACE_SEARCH_TERMS[office]
+    year = datetime.now(timezone.utc).year
+    next_year = year + 1
+    queries = [
+        f"{zipcode} {terms} election candidates {year} {next_year}",
+        f"{zipcode} {terms} election Ballotpedia",
+        f"{zipcode} {terms} candidates Vote411 voter guide",
+    ]
+    if deep:
+        queries += [
+            f"{zipcode} {terms} official candidate filing list",
+            f"{zipcode} {terms} who is running for election",
+            f"{zipcode} local election authority candidate list {terms}",
+            f"{zipcode} {terms} full list of candidates on the ballot",
+            f"{zipcode} {terms} candidates filed for {year} election",
+            f"{zipcode} {terms} primary election candidates {next_year}",
+            f"site:ballotpedia.org {zipcode} {terms} election",
+            f"{zipcode} {terms} incumbent challenger candidates news",
+        ]
+    return queries
+
+
+def _format_race_evidence_block(
+    office: str, results_by_query: "dict[str, list[tavily_search.SearchResult]]", limit: int = 10
+) -> str:
+    all_results = tavily_search.dedupe_by_url(
+        [result for results in results_by_query.values() for result in results]
+    )
+    header = f"### {office.upper()} ({OFFICE_DESCRIPTIONS[office]})"
+    if not all_results:
+        return f"{header}\nNo search results found."
+    lines = [header]
+    for result in all_results[:limit]:  # cap so the prompt stays a reasonable size
+        snippet = result.content[:600]
+        lines.append(f"- URL: {result.url}\n  Title: {result.title}\n  Excerpt: {snippet}")
+    return "\n".join(lines)
+
+
+RACE_DISCOVERY_EVIDENCE_PROMPT_TEMPLATE = """You are identifying local election races and \
+candidates for a nonpartisan voter-education tool, for zip code {zipcode}. Do not search further \
+-- work from the evidence below plus what you already know.
+
+Evidence was gathered for three race types: mayor, county, and U.S. House. Evidence for each is \
+shown below.
+
+{evidence_block}
+
+This tool prioritizes giving the reader an exhaustive candidate list over certainty -- an empty \
+list is the worst possible answer, worse than a list that turns out to include a name or two that \
+further research later corrects. Background research will keep verifying and refining these \
+candidates after this list ships, so bias heavily toward including a plausible name rather than \
+omitting a race entirely.
+
+For each of the three race types (mayor, county, us_house), fill in as much as you can -- these \
+are independent, not all-or-nothing:
+- PREFER the evidence above whenever it says something specific. When the evidence is thin or \
+silent on the jurisdiction, election date, or candidates, fill the gap from your own general \
+knowledge of this zip code and its elected offices/officeholders rather than leaving it blank -- \
+a reasonable, clearly-labeled guess is more useful here than "Unknown". Only report "Unknown" \
+jurisdiction with an empty candidates list when you genuinely have nothing to go on either from \
+the evidence or your own knowledge (e.g. this office doesn't exist for this location).
+- List EVERY candidate you can identify who is actually running for THIS SPECIFIC office -- scan \
+all the evidence above for every distinct name mentioned as running, filing, or being on the \
+ballot for this exact race, even if only one source mentions them. If different sources mention \
+different sets of candidates, include the union of everyone named across all of them (dedupe same \
+person, don't drop anyone). Add each with their name, party (if known), and incumbent status (if \
+known), from either the evidence or your own knowledge. If you identify the current officeholder \
+for this seat (from evidence or general knowledge), always add them to the candidates list with \
+"incumbent": true -- do not mention them only in "notes" without also adding a candidate entry for \
+them. It's fine and expected if they're the only candidate listed because no declared challengers \
+are known yet.
+- If the evidence and your general knowledge together turn up NO specific declared candidate for \
+this office, still name the most likely people rather than leaving "candidates" empty: the current \
+officeholder(s) if you know or can reasonably infer who they are, anyone you know to have \
+previously held or run for this seat, or a prominent local political figure who plausibly holds or \
+is contesting it. Mark every position bullet for a candidate added this way "low" confidence with \
+no source, and say in "notes" that this entry is inferred/unconfirmed rather than evidence-backed. \
+Only leave "candidates" fully empty when you have no evidence AND no general knowledge to draw on \
+at all for this office in this jurisdiction (e.g. the office doesn't exist here).
+- Only exclude a person from this race's candidates when the evidence clearly and unambiguously \
+places them in a different, unrelated office (e.g. state legislature, school board, a different \
+county's commission) -- in that case note the mix-up rather than listing them here. When it's \
+merely unclear or only loosely implied which specific office someone is tied to, resolve the \
+ambiguity in favor of including them (with a "notes" caveat about the uncertainty) rather than \
+dropping them -- a reasonable guess belongs on the list; only a clear contradiction earns exclusion.
+- NEVER put a description, placeholder, or explanation into the "name" field (e.g. "candidates not \
+identified" or "unidentified"). Use a real person's name or general-knowledge inference per the \
+rule above instead of a placeholder string.
+- For each candidate, add 1-3 short bullet points about their record, background, or stated \
+positions. Mark each one "high" confidence if the evidence above directly and specifically \
+supports it (and cite that source URL), "medium" if the evidence supports it less directly, or \
+"low" if it comes from your own general knowledge rather than the evidence above (no source URL \
+in that case -- omit "sources" or leave it empty).
+- In "notes", briefly flag when a race's jurisdiction, date, or candidates rely mainly on general \
+knowledge rather than the evidence above, so the reader knows to double-check it.
+
+Respond with ONLY a single JSON object (no markdown fences, no prose before or after) in exactly \
+this shape, with exactly one entry per race type:
+
+{{
+  "races": [
+    {{
+      "office": "mayor" | "county" | "us_house",
+      "jurisdiction_name": "<jurisdiction name, or \\"Unknown\\" only if truly unknown>",
+      "election_date": "<YYYY-MM-DD or null>",
+      "election_type": "primary" | "general" | null,
+      "notes": "<string or null>",
+      "candidates": [
+        {{
+          "name": "<candidate name>",
+          "party": "<party or null>",
+          "incumbent": true | false | null,
+          "positions": [
+            {{
+              "summary": "<short bullet point>",
+              "confidence": "high" | "medium" | "low",
+              "sources": [{{"url": "<url from the evidence above>", "title": "<title or null>"}}]
+            }}
+          ]
+        }}
+      ]
+    }}
+  ]
+}}
+"""
+
+
+_PLACEHOLDER_NAME_MARKERS = (
+    "unidentified",
+    "not identified",
+    "not found",
+    "unknown candidate",
+    "candidates not",
+    "tbd",
+    "to be determined",
+)
+
+
+def _looks_like_placeholder_name(name: str) -> bool:
+    """Defense in depth: the prompt instructs the model to never put a
+    description in the "name" field, but voter-facing correctness is high
+    stakes enough to also filter defensively for the case where it does
+    anyway (e.g. "Kent County Commissioner candidates (unidentified)")."""
+    lowered = name.lower()
+    return any(marker in lowered for marker in _PLACEHOLDER_NAME_MARKERS)
+
+
+def find_local_elections_via_tavily(
+    zipcode: str, client: "anthropic.Anthropic | None" = None, deep: bool = False
+) -> LookupResult:
+    """Fast replacement for find_local_elections. See module note above.
+
+    Two-tier by design: deep=False (the default) runs a smaller, fast query
+    set -- aimed at ~10-15s end to end, good enough to paint the page
+    immediately. deep=True runs 11 queries per race with Tavily's "advanced"
+    search depth and a much bigger evidence/output budget, aimed at actually
+    finding a complete candidate list rather than just the most prominent
+    name -- real thoroughness, at the cost of being slow (~40-60s). The
+    intended caller pattern is: fetch quick first and show it right away,
+    then kick off a deep fetch in the background and merge in whatever new
+    candidates it finds -- see appData.tsx's searchElections on the frontend.
+    Deep mode is never on the critical path a user is staring at, so this
+    tradeoff is free from the user's perspective.
+    """
+    if client is None:
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY is not set. Set it in your environment before "
+                "searching (e.g. `export ANTHROPIC_API_KEY=sk-ant-...`)."
+            )
+        client = anthropic.Anthropic()
+
+    queries_by_office = {office: _race_search_queries(zipcode, office, deep=deep) for office in OFFICES}
+    all_queries = [query for queries in queries_by_office.values() for query in queries]
+    results_by_query = tavily_search.search_many(
+        all_queries,
+        max_results_per_query=8 if deep else 4,
+        search_depth="advanced" if deep else "basic",
+    )
+
+    evidence_limit = 30 if deep else 10
+    evidence_block = "\n\n".join(
+        _format_race_evidence_block(
+            office,
+            {query: results_by_query.get(query, []) for query in queries_by_office[office]},
+            limit=evidence_limit,
+        )
+        for office in OFFICES
+    )
+
+    prompt = RACE_DISCOVERY_EVIDENCE_PROMPT_TEMPLATE.format(zipcode=zipcode, evidence_block=evidence_block)
+
+    def parse(text: str) -> LookupResult:
+        result = parse_lookup_response(zipcode, text)
+        if not result.races:
+            raise ValueError("Model response JSON did not include any races.")
+        for race in result.races:
+            race.candidates = [c for c in race.candidates if not _looks_like_placeholder_name(c.name)]
+        return result
+
+    return _call_model_and_parse(
+        client,
+        prompt,
+        max_tokens=8000 if deep else 4000,
+        refusal_subject=f"local elections for zip {zipcode}",
+        parse=parse,
+        use_web_search=False,
+    )
+
+
 def research_candidate_positions(
     zipcode: str,
     office: str,
@@ -832,16 +1065,24 @@ _VALID_INFERENCE_LEVELS = {"explicit", "strong_inference", "weak_inference"}
 
 
 def _candidate_search_queries(candidate_name: str, office: str, jurisdiction_name: str) -> "list[str]":
+    """7 queries -- this research runs automatically in the background for
+    every candidate as soon as a race is found (not something the user is
+    blocked waiting on), so it can afford real thoroughness: more distinct
+    source types means more genuine "explicit"/"strong_inference" evidence
+    surfaces naturally, without loosening how that evidence gets classified."""
     office_label = {
         "mayor": "mayor",
         "county": "county",
         "us_house": "U.S. House",
     }.get(office, office)
     return [
-        f"{candidate_name} {jurisdiction_name} {office_label} Vote411",
-        f"{candidate_name} {jurisdiction_name} {office_label} Ballotpedia Candidate Connection",
+        f"{candidate_name} {jurisdiction_name} {office_label} Ballotpedia",
+        f"{candidate_name} {jurisdiction_name} {office_label} Vote411 voter guide",
         f"{candidate_name} {jurisdiction_name} {office_label} official statement voting record",
         f"{candidate_name} {jurisdiction_name} {office_label} campaign positions priorities",
+        f"{candidate_name} {jurisdiction_name} {office_label} candidate questionnaire survey",
+        f"{candidate_name} {jurisdiction_name} {office_label} news interview",
+        f"{candidate_name} {jurisdiction_name} {office_label} endorsement forum debate",
     ]
 
 
@@ -855,7 +1096,7 @@ def _format_evidence_block(
         return f"### {candidate_name}\nNo search results found."
 
     lines = [f"### {candidate_name}"]
-    for result in all_results[:12]:  # cap so the prompt stays a reasonable size
+    for result in all_results[:20]:  # cap so the prompt stays a reasonable size
         snippet = result.content[:600]
         lines.append(f"- URL: {result.url}\n  Title: {result.title}\n  Excerpt: {snippet}")
     return "\n".join(lines)
@@ -871,13 +1112,19 @@ For each candidate and each question, classify your answer's confidence as exact
 this exact question.
 - "strong_inference": the evidence strongly implies a position (e.g. a closely related vote, \
 statement, or documented record) even without an exact direct quote on this precise question.
-- "weak_inference": only a loose or partial signal exists (e.g. a general priority mentioned once, \
-tangential to this specific question).
+- "weak_inference": ANY plausible, evidence-grounded connection between something the candidate \
+has actually said or done and this question's general subject -- a related campaign priority, a \
+broader platform statement that touches this topic, a single loosely-related remark, or a general \
+policy stance that the question's topic falls under. Be generous here: err toward answering rather \
+than skipping when there's some real, candidate-specific evidence to reason from, even if it \
+doesn't address this exact question precisely.
 
-Do NOT answer a question at all if the only basis would be the candidate's party affiliation \
-alone, an endorsement alone, demographic assumptions, or the simple absence of information -- \
-these are never acceptable evidence on their own. If nothing in the evidence meets at least \
-"weak_inference" for a question, leave that question out entirely for that candidate.
+The one line that stays firm: do NOT answer a question if the ONLY basis would be the candidate's \
+party affiliation alone with no candidate-specific evidence at all, an endorsement alone, \
+demographic assumptions alone, or the simple absence of information -- these can support an \
+answer when combined with SOME real evidence about the candidate, but never substitute for it \
+entirely. If there is truly no candidate-specific evidence at all connecting them to a question's \
+subject, leave that question out for that candidate.
 
 Race: {office_description} ({jurisdiction_name}, zip code {zipcode})
 
@@ -1018,7 +1265,7 @@ def research_candidates_via_tavily(
         for candidate in candidates
     }
     all_queries = [query for queries in queries_by_candidate.values() for query in queries]
-    results_by_query = tavily_search.search_many(all_queries, max_results_per_query=4)
+    results_by_query = tavily_search.search_many(all_queries, max_results_per_query=6)
 
     evidence_block = "\n\n".join(
         _format_evidence_block(

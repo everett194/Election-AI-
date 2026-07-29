@@ -32,8 +32,16 @@ class SearchResult:
     content: str
 
 
-def search(query: str, max_results: int = 5, api_key: str | None = None) -> list[SearchResult]:
-    """Runs one Tavily search query and returns its results."""
+def search(
+    query: str, max_results: int = 5, api_key: str | None = None, search_depth: str = "basic"
+) -> list[SearchResult]:
+    """Runs one Tavily search query and returns its results.
+
+    search_depth="advanced" asks Tavily for a more thorough (but slower and
+    more expensive) search -- worth it for background/non-blocking research
+    where a few extra seconds don't hurt perceived speed, not worth it for
+    anything the user is actively waiting on.
+    """
     api_key = api_key or os.environ.get("TAVILY_API_KEY")
     if not api_key:
         raise RuntimeError(
@@ -46,9 +54,9 @@ def search(query: str, max_results: int = 5, api_key: str | None = None) -> list
             "api_key": api_key,
             "query": query,
             "max_results": max_results,
-            "search_depth": "basic",
+            "search_depth": search_depth,
         },
-        timeout=20,
+        timeout=30,
     )
     response.raise_for_status()
     data = response.json()
@@ -64,26 +72,42 @@ def search(query: str, max_results: int = 5, api_key: str | None = None) -> list
 
 
 def search_many(
-    queries: list[str], max_results_per_query: int = 5, api_key: str | None = None
+    queries: list[str],
+    max_results_per_query: int = 5,
+    api_key: str | None = None,
+    search_depth: str = "basic",
 ) -> dict[str, list[SearchResult]]:
     """Runs every query in `queries` in parallel and returns {query: results}.
-    One query's failure (network error, bad response, etc.) doesn't affect
-    the others -- it just yields an empty result list for that query.
+    A single query failing (one bad request, a transient network blip) doesn't
+    affect the others -- it just yields an empty result list for that query.
+
+    But if EVERY query fails, that's not "nothing found" -- it's a systemic
+    problem (missing/invalid TAVILY_API_KEY, Tavily is down, no network), and
+    silently returning all-empty results makes that failure indistinguishable
+    from a real, legitimate zero-result search. In that case, raise instead.
     """
     if not queries:
         return {}
     results: dict[str, list[SearchResult]] = {}
-    with ThreadPoolExecutor(max_workers=min(8, len(queries))) as executor:
+    errors: dict[str, Exception] = {}
+    with ThreadPoolExecutor(max_workers=min(20, len(queries))) as executor:
         future_to_query = {
-            executor.submit(search, query, max_results_per_query, api_key): query
+            executor.submit(search, query, max_results_per_query, api_key, search_depth): query
             for query in queries
         }
         for future in as_completed(future_to_query):
             query = future_to_query[future]
             try:
                 results[query] = future.result()
-            except Exception:
+            except Exception as exc:
                 results[query] = []
+                errors[query] = exc
+    if errors and len(errors) == len(queries):
+        sample = next(iter(errors.values()))
+        raise RuntimeError(
+            f"Tavily search failed for all {len(queries)} queries -- check TAVILY_API_KEY "
+            f"and your network connection. Sample error: {sample}"
+        )
     return results
 
 

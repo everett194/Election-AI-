@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import { useNav } from '../context/nav'
 import { useAppData, candidateKey } from '../context/appData'
-import { CandidateCard, CandidateCardSkeleton } from '../components/Cards'
+import { CandidateCard } from '../components/Cards'
 import { EmptyState } from '../components/ui'
 import { categoryLabelMap, confidenceBucket, initialsFor, issueTagsFor } from '../lib/derive'
 import type { Office } from '../api'
@@ -117,13 +117,12 @@ export default function RacePage() {
           </div>
         )}
 
-        {/* Candidates */}
+        {/* Candidates -- always shown immediately (names/party come back with the
+            race search itself); only the research-dependent parts (issue tags,
+            confidence, at-a-glance summary) wait on the slower per-candidate
+            policy lookup, which runs in the background. */}
         {race.candidates.length === 0 ? (
           <EmptyState title="No candidates found" description="No candidates were identified for this race." />
-        ) : researching ? (
-          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-5">
-            {race.candidates.map((c) => <CandidateCardSkeleton key={c.name} />)}
-          </div>
         ) : (
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-5">
             {race.candidates.map((candidate, idx) => {
@@ -138,6 +137,7 @@ export default function RacePage() {
                   issueTags={issueTagsFor(profile, labels)}
                   confidenceLevel={confidenceBucket(profile)}
                   summary={candidate.positions[0]?.summary ?? null}
+                  researching={researching && !profile}
                   index={idx}
                   onViewProfile={() => navigate('candidate', { office: race.office, name: candidate.name })}
                   selected={comparisonKeys.includes(key)}

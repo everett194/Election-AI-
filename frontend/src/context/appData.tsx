@@ -23,9 +23,34 @@ interface ElectionsState {
   retrievedAt: string | null
   races: ApiRace[]
   error: string | null
+  /** Status of the slower, more thorough background search that runs after
+   * the fast initial results are already on screen -- see searchElections. */
+  deepStatus: FetchStatus
 }
 
-const EMPTY_ELECTIONS: ElectionsState = { status: 'idle', zipcode: '', retrievedAt: null, races: [], error: null }
+const EMPTY_ELECTIONS: ElectionsState = {
+  status: 'idle',
+  zipcode: '',
+  retrievedAt: null,
+  races: [],
+  error: null,
+  deepStatus: 'idle',
+}
+
+/** Merges a deeper, more thorough race search into what's already on screen --
+ * unions candidates by name per office (deep's version wins on overlap, but
+ * nothing found by the quick pass is ever dropped) and takes the deep pass's
+ * jurisdiction/date/notes, which are usually more complete. */
+function mergeRaces(base: ApiRace[], deep: ApiRace[]): ApiRace[] {
+  const deepByOffice = new Map(deep.map((race) => [race.office, race]))
+  return base.map((race) => {
+    const deepRace = deepByOffice.get(race.office)
+    if (!deepRace) return race
+    const candidatesByName = new Map(race.candidates.map((c) => [c.name, c]))
+    for (const candidate of deepRace.candidates) candidatesByName.set(candidate.name, candidate)
+    return { ...deepRace, candidates: Array.from(candidatesByName.values()) }
+  })
+}
 
 interface AppDataContextType {
   elections: ElectionsState
@@ -83,33 +108,102 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
   const [resultsStatus, setResultsStatus] = useState<FetchStatus>('idle')
   const [resultsError, setResultsError] = useState<string | null>(null)
 
-  const searchElections = useCallback(async (zipcode: string) => {
-    setElections({ status: 'loading', zipcode, retrievedAt: null, races: [], error: null })
-    setProfiles({})
-    setRaceResearchStatus({})
-    setRaceResearchError({})
-    setComparisonKeys([])
-    setResults(null)
-    setResultsStatus('idle')
+  // Core candidate-research fetch, factored out of ensureRaceResearched so it
+  // can also be kicked off directly with fresh race data inside
+  // searchElections -- calling ensureRaceResearched there would read stale
+  // `elections` state, since setElections's effect hasn't landed yet.
+  const researchRace = useCallback(async (zipcode: string, race: ApiRace) => {
+    if (race.candidates.length === 0) return
+    setRaceResearchStatus((prev) => ({ ...prev, [race.office]: 'loading' }))
+    setRaceResearchError((prev) => ({ ...prev, [race.office]: null }))
     try {
-      const response = await api.getElections(zipcode)
-      setElections({
-        status: 'loaded',
-        zipcode: response.zipcode,
-        retrievedAt: response.retrieved_at,
-        races: response.races,
-        error: null,
-      })
-    } catch (err) {
-      setElections({
-        status: 'error',
+      const response = await api.researchCandidates({
         zipcode,
-        retrievedAt: null,
-        races: [],
-        error: err instanceof api.ApiError ? err.message : 'Something went wrong loading elections.',
+        office: race.office,
+        jurisdiction_name: race.jurisdiction_name,
+        candidates: race.candidates.map((c) => ({ name: c.name, party: c.party, incumbent: c.incumbent })),
       })
+      setProfiles((prev) => {
+        const next = { ...prev }
+        for (const [name, profile] of Object.entries(response.profiles)) {
+          next[candidateKey(race.office, name)] = profile
+        }
+        return next
+      })
+      setRaceResearchStatus((prev) => ({ ...prev, [race.office]: 'loaded' }))
+    } catch (err) {
+      setRaceResearchStatus((prev) => ({ ...prev, [race.office]: 'error' }))
+      setRaceResearchError((prev) => ({
+        ...prev,
+        [race.office]: err instanceof api.ApiError ? err.message : 'Candidate research failed.',
+      }))
     }
   }, [])
+
+  const searchElections = useCallback(
+    async (zipcode: string) => {
+      setElections({ status: 'loading', zipcode, retrievedAt: null, races: [], error: null, deepStatus: 'idle' })
+      setProfiles({})
+      setRaceResearchStatus({})
+      setRaceResearchError({})
+      setComparisonKeys([])
+      setResults(null)
+      setResultsStatus('idle')
+      try {
+        const response = await api.getElections(zipcode)
+        setElections({
+          status: 'loaded',
+          zipcode: response.zipcode,
+          retrievedAt: response.retrieved_at,
+          races: response.races,
+          error: null,
+          deepStatus: 'loading',
+        })
+
+        // Research every candidate found, right away, in the background --
+        // not awaited, so the page itself is already interactive.
+        void Promise.all(
+          response.races.filter((r) => r.candidates.length > 0).map((r) => researchRace(zipcode, r)),
+        )
+      } catch (err) {
+        setElections({
+          status: 'error',
+          zipcode,
+          retrievedAt: null,
+          races: [],
+          error: err instanceof api.ApiError ? err.message : 'Something went wrong loading elections.',
+          deepStatus: 'idle',
+        })
+        return
+      }
+
+      // Fire the slower, more thorough race-discovery pass in the background
+      // too -- not awaited by this function's own promise, so callers see
+      // "loaded" as soon as the fast pass lands. Merges in when it finishes;
+      // failure here just means the quick results stand as-is, not a hard
+      // error.
+      try {
+        const deepResponse = await api.getElections(zipcode, true)
+        let racesNeedingResearch: ApiRace[] = []
+        setElections((prev) => {
+          if (prev.zipcode !== zipcode) return prev // a newer search superseded this one -- discard
+          const merged = mergeRaces(prev.races, deepResponse.races)
+          const prevCountByOffice = new Map(prev.races.map((r) => [r.office, r.candidates.length]))
+          racesNeedingResearch = merged.filter(
+            (r) => r.candidates.length > 0 && r.candidates.length !== prevCountByOffice.get(r.office),
+          )
+          return { ...prev, races: merged, deepStatus: 'loaded' }
+        })
+        // Only re-research races where the deep pass actually found new
+        // candidates -- avoids paying for a duplicate call when it found
+        // nothing the quick pass hadn't already covered.
+        void Promise.all(racesNeedingResearch.map((r) => researchRace(zipcode, r)))
+      } catch {
+        setElections((prev) => (prev.zipcode !== zipcode ? prev : { ...prev, deepStatus: 'error' }))
+      }
+    },
+    [researchRace],
+  )
 
   const ensureQuestionsLoaded = useCallback(async () => {
     if (questionsStatus === 'loaded' || questionsStatus === 'loading') return
@@ -128,33 +222,9 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       if (raceResearchStatus[office] === 'loaded' || raceResearchStatus[office] === 'loading') return
       const race = elections.races.find((r) => r.office === office)
       if (!race || race.candidates.length === 0) return
-
-      setRaceResearchStatus((prev) => ({ ...prev, [office]: 'loading' }))
-      setRaceResearchError((prev) => ({ ...prev, [office]: null }))
-      try {
-        const response = await api.researchCandidates({
-          zipcode: elections.zipcode,
-          office,
-          jurisdiction_name: race.jurisdiction_name,
-          candidates: race.candidates.map((c) => ({ name: c.name, party: c.party, incumbent: c.incumbent })),
-        })
-        setProfiles((prev) => {
-          const next = { ...prev }
-          for (const [name, profile] of Object.entries(response.profiles)) {
-            next[candidateKey(office, name)] = profile
-          }
-          return next
-        })
-        setRaceResearchStatus((prev) => ({ ...prev, [office]: 'loaded' }))
-      } catch (err) {
-        setRaceResearchStatus((prev) => ({ ...prev, [office]: 'error' }))
-        setRaceResearchError((prev) => ({
-          ...prev,
-          [office]: err instanceof api.ApiError ? err.message : 'Candidate research failed.',
-        }))
-      }
+      await researchRace(elections.zipcode, race)
     },
-    [elections.races, elections.zipcode, raceResearchStatus],
+    [elections.races, elections.zipcode, raceResearchStatus, researchRace],
   )
 
   const ensureAllRacesResearched = useCallback(async () => {

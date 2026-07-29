@@ -8,6 +8,7 @@ from election_lookup import (
     LookupResult,
     Position,
     find_local_elections,
+    find_local_elections_via_tavily,
     parse_candidate_research_response,
     parse_candidates_evidence_response,
     parse_candidates_prediction_response,
@@ -369,6 +370,151 @@ def test_find_local_elections_degrades_gracefully_on_single_office_failure():
     assert by_office["us_house"].jurisdiction_name == "Example District"
     assert by_office["county"].candidates == []
     assert "failed" in by_office["county"].notes.lower()
+
+
+COMBINED_RACES_EVIDENCE_JSON = """{
+  "races": [
+    {
+      "office": "mayor",
+      "jurisdiction_name": "Springfield",
+      "election_date": "2026-11-03",
+      "election_type": "general",
+      "notes": null,
+      "candidates": [
+        {
+          "name": "Jane Doe",
+          "party": "Independent",
+          "incumbent": true,
+          "positions": [
+            {"summary": "Supports expanding the downtown bus line.", "confidence": "high",
+             "sources": [{"url": "https://example.com/jane", "title": "Platform"}]}
+          ]
+        }
+      ]
+    },
+    {
+      "office": "county",
+      "jurisdiction_name": "Unknown",
+      "election_date": null,
+      "election_type": null,
+      "notes": "No evidence found for a county race.",
+      "candidates": []
+    },
+    {
+      "office": "us_house",
+      "jurisdiction_name": "Example District",
+      "election_date": "2026-11-03",
+      "election_type": "general",
+      "notes": null,
+      "candidates": []
+    }
+  ]
+}"""
+
+
+def test_find_local_elections_via_tavily_fetches_evidence_then_synthesizes():
+    fake_client = MagicMock()
+    fake_client.messages.create.return_value = _mock_response(COMBINED_RACES_EVIDENCE_JSON)
+
+    def fake_search_many(queries, max_results_per_query=5, api_key=None, search_depth='basic'):
+        return {
+            query: [SearchResult(title="Result", url="https://example.com/x", content="Some evidence text")]
+            for query in queries
+        }
+
+    with patch("election_lookup.tavily_search.search_many", side_effect=fake_search_many) as mock_search_many:
+        result = find_local_elections_via_tavily("62704", client=fake_client)
+
+    # One Tavily fan-out call covering all three race types at once.
+    assert mock_search_many.call_count == 1
+    searched_queries = mock_search_many.call_args.args[0]
+    assert any("mayor" in q for q in searched_queries)
+    assert any("county" in q for q in searched_queries)
+    assert any("US House" in q for q in searched_queries)
+
+    # Exactly one Claude call for all three races, without the web_search tool
+    # (evidence was pre-fetched, so Claude doesn't need to search itself).
+    assert fake_client.messages.create.call_count == 1
+    call_kwargs = fake_client.messages.create.call_args.kwargs
+    assert "tools" not in call_kwargs
+
+    assert [r.office for r in result.races] == ["mayor", "county", "us_house"]
+    assert result.races[0].jurisdiction_name == "Springfield"
+    assert result.races[0].candidates[0].name == "Jane Doe"
+    assert result.races[1].candidates == []
+
+
+def test_find_local_elections_via_tavily_deep_mode_runs_more_queries():
+    fake_client = MagicMock()
+    fake_client.messages.create.return_value = _mock_response(COMBINED_RACES_EVIDENCE_JSON)
+
+    def fake_search_many(queries, max_results_per_query=5, api_key=None, search_depth='basic'):
+        return {
+            query: [SearchResult(title="Result", url="https://example.com/x", content="Some evidence text")]
+            for query in queries
+        }
+
+    with patch("election_lookup.tavily_search.search_many", side_effect=fake_search_many) as mock_search_many:
+        find_local_elections_via_tavily("62704", client=fake_client, deep=False)
+        quick_query_count = len(mock_search_many.call_args.args[0])
+        quick_kwargs = mock_search_many.call_args.kwargs
+
+        find_local_elections_via_tavily("62704", client=fake_client, deep=True)
+        deep_query_count = len(mock_search_many.call_args.args[0])
+        deep_kwargs = mock_search_many.call_args.kwargs
+
+    # Deep mode runs strictly more queries per race than quick mode, and asks
+    # Tavily for its more thorough (slower) search depth.
+    assert deep_query_count > quick_query_count
+    assert quick_kwargs.get("search_depth") == "basic"
+    assert deep_kwargs.get("search_depth") == "advanced"
+
+
+def test_find_local_elections_via_tavily_drops_placeholder_candidate_names():
+    fake_client = MagicMock()
+    races_with_placeholder = """{
+      "races": [
+        {
+          "office": "mayor",
+          "jurisdiction_name": "Springfield",
+          "election_date": null,
+          "election_type": null,
+          "notes": null,
+          "candidates": [
+            {"name": "Jane Doe", "party": "Independent", "incumbent": true, "positions": []},
+            {"name": "Kent County Commissioner candidates (unidentified)", "party": null,
+             "incumbent": null, "positions": []}
+          ]
+        },
+        {"office": "county", "jurisdiction_name": "Unknown", "election_date": null,
+         "election_type": null, "notes": "none", "candidates": []},
+        {"office": "us_house", "jurisdiction_name": "Unknown", "election_date": null,
+         "election_type": null, "notes": "none", "candidates": []}
+      ]
+    }"""
+    fake_client.messages.create.return_value = _mock_response(races_with_placeholder)
+
+    with patch("election_lookup.tavily_search.search_many", return_value={}):
+        result = find_local_elections_via_tavily("62704", client=fake_client)
+
+    mayor = next(r for r in result.races if r.office == "mayor")
+    assert [c.name for c in mayor.candidates] == ["Jane Doe"]
+
+
+def test_find_local_elections_via_tavily_raises_without_api_key(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with patch("election_lookup.tavily_search.search_many", return_value={}):
+        with pytest.raises(RuntimeError):
+            find_local_elections_via_tavily("62704")
+
+
+def test_find_local_elections_via_tavily_raises_when_no_races_returned():
+    fake_client = MagicMock()
+    fake_client.messages.create.return_value = _mock_response('{"races": []}')
+
+    with patch("election_lookup.tavily_search.search_many", return_value={}):
+        with pytest.raises(ValueError):
+            find_local_elections_via_tavily("62704", client=fake_client)
 
 
 def test_research_candidate_positions_calls_api_with_all_questions_and_context():
@@ -733,7 +879,7 @@ def test_research_candidates_via_tavily_fetches_evidence_then_synthesizes():
         Candidate(name="John Smith", party="Democratic", incumbent=False, positions=[]),
     ]
 
-    def fake_search_many(queries, max_results_per_query=5, api_key=None):
+    def fake_search_many(queries, max_results_per_query=5, api_key=None, search_depth='basic'):
         return {
             query: [SearchResult(title="Result", url="https://example.com/x", content="Some evidence text")]
             for query in queries
@@ -775,7 +921,7 @@ def test_research_candidates_via_tavily_raises_without_api_key(monkeypatch):
             research_candidates_via_tavily("62704", "mayor", "Springfield", candidates)
 
 
-def _empty_evidence_search_many(queries, max_results_per_query=5, api_key=None):
+def _empty_evidence_search_many(queries, max_results_per_query=5, api_key=None, search_depth='basic'):
     return {query: [] for query in queries}
 
 
