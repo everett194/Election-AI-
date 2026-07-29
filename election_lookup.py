@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Iterator, Literal, TypeVar
@@ -677,28 +678,96 @@ _RACE_SEARCH_TERMS = {
     "us_house": "US House Representative congressional",
 }
 
+_US_STATE_NAMES = [
+    "Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado", "Connecticut",
+    "Delaware", "Florida", "Georgia", "Hawaii", "Idaho", "Illinois", "Indiana", "Iowa",
+    "Kansas", "Kentucky", "Louisiana", "Maine", "Maryland", "Massachusetts", "Michigan",
+    "Minnesota", "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada",
+    "New Hampshire", "New Jersey", "New Mexico", "New York", "North Carolina",
+    "North Dakota", "Ohio", "Oklahoma", "Oregon", "Pennsylvania", "Rhode Island",
+    "South Carolina", "South Dakota", "Tennessee", "Texas", "Utah", "Vermont",
+    "Virginia", "Washington", "West Virginia", "Wisconsin", "Wyoming",
+]
 
-def _race_search_queries(zipcode: str, office: str) -> "list[str]":
+
+@dataclass
+class ZipPlace:
+    city: str | None
+    county: str | None
+    state: str | None
+
+
+def _resolve_zipcode_place(zipcode: str) -> "ZipPlace | None":
+    """One quick Tavily search to translate a raw zip code into a real place
+    name (city/county/state). A bare zip code is a weak search anchor on its
+    own -- Tavily often surfaces results for unrelated counties whose pages
+    happen to mention that zip in passing -- but "Kent County, Maryland" or
+    "Chestertown, Maryland" reliably pulls up the right local sources.
+    Returns None (falls back to raw zip code queries) if resolution finds
+    nothing usable."""
+    try:
+        results = tavily_search.search(
+            f"{zipcode} zip code city county state", max_results=5, search_depth="basic"
+        )
+    except Exception:
+        return None
+    text = " ".join(f"{r.title} {r.content}" for r in results)
+    county_matches = re.findall(r"\b([A-Z][a-zA-Z.'-]+(?:\s[A-Z][a-zA-Z.'-]+)?)\s+County\b", text)
+    county = Counter(county_matches).most_common(1)[0][0] if county_matches else None
+    state_matches = [name for name in _US_STATE_NAMES if name in text]
+    state = Counter(state_matches).most_common(1)[0][0] if state_matches else None
+    city_matches = re.findall(r"[Cc]ity of ([A-Z][a-zA-Z.'-]+(?:\s[A-Z][a-zA-Z.'-]+)?)", text)
+    city_matches += re.findall(r"Post Office City:\s*([A-Z][a-zA-Z.'-]+(?:\s[A-Z][a-zA-Z.'-]+)?)", text)
+    city = Counter(city_matches).most_common(1)[0][0] if city_matches else None
+    if not county and not state and not city:
+        return None
+    return ZipPlace(city=city, county=county, state=state)
+
+
+def _location_label(zipcode: str, office: str, place: "ZipPlace | None") -> str:
+    """Best available search-friendly location string for this office's
+    race -- a real place name beats a bare zip code (see
+    _resolve_zipcode_place), falling back to the zip code alone when
+    resolution didn't find anything."""
+    if not place:
+        return zipcode
+    if office == "county" and place.county and place.state:
+        return f"{place.county} County, {place.state}"
+    if place.city and place.state:
+        return f"{place.city}, {place.state}"
+    if place.county and place.state:
+        return f"{place.county} County, {place.state}"
+    return zipcode
+
+
+def _race_search_queries(zipcode: str, office: str, place: "ZipPlace | None" = None) -> "list[str]":
     """11 queries per office, run concurrently against Tavily's "basic" (fast)
     search depth -- broad query coverage for a complete candidate list,
     without advanced depth's per-query slowness. See find_local_elections_via_tavily
     for why breadth-of-queries + basic depth + full parallelism is the fast AND
-    thorough combination, rather than trading one off against the other."""
+    thorough combination, rather than trading one off against the other.
+
+    Queries lead with a real place name (e.g. "Kent County, Maryland")
+    instead of the bare zip code whenever one was resolved -- a raw zip code
+    is a weak search anchor that often pulls in unrelated counties whose
+    pages merely mention that zip in passing, while a place name reliably
+    surfaces the right local sources. See _resolve_zipcode_place."""
     terms = _RACE_SEARCH_TERMS[office]
+    location = _location_label(zipcode, office, place)
     year = datetime.now(timezone.utc).year
     next_year = year + 1
     return [
-        f"{zipcode} {terms} election candidates {year} {next_year}",
-        f"{zipcode} {terms} election Ballotpedia",
-        f"{zipcode} {terms} candidates Vote411 voter guide",
-        f"{zipcode} {terms} official candidate filing list",
-        f"{zipcode} {terms} who is running for election",
-        f"{zipcode} local election authority candidate list {terms}",
-        f"{zipcode} {terms} full list of candidates on the ballot",
-        f"{zipcode} {terms} candidates filed for {year} election",
-        f"{zipcode} {terms} primary election candidates {next_year}",
-        f"site:ballotpedia.org {zipcode} {terms} election",
-        f"{zipcode} {terms} incumbent challenger candidates news",
+        f"{location} {terms} election candidates {year} {next_year}",
+        f"{location} {terms} election Ballotpedia",
+        f"{location} {terms} candidates Vote411 voter guide",
+        f"{location} {terms} official candidate filing list",
+        f"{location} {terms} who is running for election",
+        f"{location} local election authority candidate list {terms}",
+        f"{location} {terms} full list of candidates on the ballot",
+        f"{location} {terms} candidates filed for {year} election",
+        f"{location} {terms} primary election candidates {next_year}",
+        f"site:ballotpedia.org {location} {terms} election",
+        f"{location} {terms} incumbent challenger candidates news",
     ]
 
 
@@ -719,8 +788,8 @@ def _format_race_evidence_block(
 
 
 RACE_DISCOVERY_EVIDENCE_PROMPT_TEMPLATE = """You are identifying local election races and \
-candidates for a nonpartisan voter-education tool, for zip code {zipcode}. Do not search further \
--- work from the evidence below plus what you already know.
+candidates for a nonpartisan voter-education tool, for zip code {zipcode}{place_hint}. Do not \
+search further -- work from the evidence below plus what you already know.
 
 Evidence was gathered for three race types: mayor, county, and U.S. House. Evidence for each is \
 shown below.
@@ -755,8 +824,7 @@ are known yet.
 this office, still name the most likely people rather than leaving "candidates" empty: the current \
 officeholder(s) if you know or can reasonably infer who they are, anyone you know to have \
 previously held or run for this seat, or a prominent local political figure who plausibly holds or \
-is contesting it. Mark every position bullet for a candidate added this way "low" confidence with \
-no source, and say in "notes" that this entry is inferred/unconfirmed rather than evidence-backed. \
+is contesting it. Say in "notes" that this entry is inferred/unconfirmed rather than evidence-backed. \
 Only leave "candidates" fully empty when you have no evidence AND no general knowledge to draw on \
 at all for this office in this jurisdiction (e.g. the office doesn't exist here).
 - Only exclude a person from this race's candidates when the evidence clearly and unambiguously \
@@ -768,11 +836,10 @@ dropping them -- a reasonable guess belongs on the list; only a clear contradict
 - NEVER put a description, placeholder, or explanation into the "name" field (e.g. "candidates not \
 identified" or "unidentified"). Use a real person's name or general-knowledge inference per the \
 rule above instead of a placeholder string.
-- For each candidate, add 1-3 short bullet points about their record, background, or stated \
-positions. Mark each one "high" confidence if the evidence above directly and specifically \
-supports it (and cite that source URL), "medium" if the evidence supports it less directly, or \
-"low" if it comes from your own general knowledge rather than the evidence above (no source URL \
-in that case -- omit "sources" or leave it empty).
+- Do NOT research or summarize each candidate's record or positions here -- just the name, party, \
+and incumbent status. A separate, deeper research pass looks up each candidate's actual positions \
+afterward; this step is purely about finding the complete list of who's running, as fast as \
+possible.
 - In "notes", briefly flag when a race's jurisdiction, date, or candidates rely mainly on general \
 knowledge rather than the evidence above, so the reader knows to double-check it.
 
@@ -791,14 +858,7 @@ this shape, with exactly one entry per race type:
         {{
           "name": "<candidate name>",
           "party": "<party or null>",
-          "incumbent": true | false | null,
-          "positions": [
-            {{
-              "summary": "<short bullet point>",
-              "confidence": "high" | "medium" | "low",
-              "sources": [{{"url": "<url from the evidence above>", "title": "<title or null>"}}]
-            }}
-          ]
+          "incumbent": true | false | null
         }}
       ]
     }}
@@ -839,6 +899,12 @@ def find_local_elections_via_tavily(
     slower without adding coverage, so basic depth + more queries + full
     parallelism gets both speed and exhaustiveness instead of trading one for
     the other.
+
+    First resolves the zip code to a real place name (see
+    _resolve_zipcode_place) and uses that in every query instead of the bare
+    zip code -- a raw zip code alone is a weak search anchor that pulls in
+    unrelated counties, while "Kent County, Maryland" reliably surfaces the
+    right local sources.
     """
     if client is None:
         if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -848,7 +914,8 @@ def find_local_elections_via_tavily(
             )
         client = anthropic.Anthropic()
 
-    queries_by_office = {office: _race_search_queries(zipcode, office) for office in OFFICES}
+    place = _resolve_zipcode_place(zipcode)
+    queries_by_office = {office: _race_search_queries(zipcode, office, place) for office in OFFICES}
     all_queries = [query for queries in queries_by_office.values() for query in queries]
     results_by_query = tavily_search.search_many(
         all_queries,
@@ -865,7 +932,14 @@ def find_local_elections_via_tavily(
         for office in OFFICES
     )
 
-    prompt = RACE_DISCOVERY_EVIDENCE_PROMPT_TEMPLATE.format(zipcode=zipcode, evidence_block=evidence_block)
+    place_hint = ""
+    if place:
+        parts = [p for p in (place.city, f"{place.county} County" if place.county else None, place.state) if p]
+        if parts:
+            place_hint = f" ({', '.join(parts)})"
+    prompt = RACE_DISCOVERY_EVIDENCE_PROMPT_TEMPLATE.format(
+        zipcode=zipcode, place_hint=place_hint, evidence_block=evidence_block
+    )
 
     def parse(text: str) -> LookupResult:
         result = parse_lookup_response(zipcode, text)

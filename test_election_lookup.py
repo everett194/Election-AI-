@@ -422,7 +422,8 @@ def test_find_local_elections_via_tavily_fetches_evidence_then_synthesizes():
             for query in queries
         }
 
-    with patch("election_lookup.tavily_search.search_many", side_effect=fake_search_many) as mock_search_many:
+    with patch("election_lookup.tavily_search.search_many", side_effect=fake_search_many) as mock_search_many, \
+         patch("election_lookup._resolve_zipcode_place", return_value=None):
         result = find_local_elections_via_tavily("62704", client=fake_client)
 
     # One Tavily fan-out call covering all three race types at once.
@@ -454,7 +455,8 @@ def test_find_local_elections_via_tavily_runs_broad_query_set_at_basic_depth():
             for query in queries
         }
 
-    with patch("election_lookup.tavily_search.search_many", side_effect=fake_search_many) as mock_search_many:
+    with patch("election_lookup.tavily_search.search_many", side_effect=fake_search_many) as mock_search_many, \
+         patch("election_lookup._resolve_zipcode_place", return_value=None):
         find_local_elections_via_tavily("62704", client=fake_client)
         query_count = len(mock_search_many.call_args.args[0])
         kwargs = mock_search_many.call_args.kwargs
@@ -490,7 +492,8 @@ def test_find_local_elections_via_tavily_drops_placeholder_candidate_names():
     }"""
     fake_client.messages.create.return_value = _mock_response(races_with_placeholder)
 
-    with patch("election_lookup.tavily_search.search_many", return_value={}):
+    with patch("election_lookup.tavily_search.search_many", return_value={}), \
+         patch("election_lookup._resolve_zipcode_place", return_value=None):
         result = find_local_elections_via_tavily("62704", client=fake_client)
 
     mayor = next(r for r in result.races if r.office == "mayor")
@@ -499,7 +502,8 @@ def test_find_local_elections_via_tavily_drops_placeholder_candidate_names():
 
 def test_find_local_elections_via_tavily_raises_without_api_key(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    with patch("election_lookup.tavily_search.search_many", return_value={}):
+    with patch("election_lookup.tavily_search.search_many", return_value={}), \
+         patch("election_lookup._resolve_zipcode_place", return_value=None):
         with pytest.raises(RuntimeError):
             find_local_elections_via_tavily("62704")
 
@@ -508,7 +512,8 @@ def test_find_local_elections_via_tavily_raises_when_no_races_returned():
     fake_client = MagicMock()
     fake_client.messages.create.return_value = _mock_response('{"races": []}')
 
-    with patch("election_lookup.tavily_search.search_many", return_value={}):
+    with patch("election_lookup.tavily_search.search_many", return_value={}), \
+         patch("election_lookup._resolve_zipcode_place", return_value=None):
         with pytest.raises(ValueError):
             find_local_elections_via_tavily("62704", client=fake_client)
 
