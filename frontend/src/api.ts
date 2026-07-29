@@ -140,8 +140,8 @@ export function getQuestions(): Promise<ApiQuestion[]> {
   return request('/api/questions')
 }
 
-export function getElections(zipcode: string, deep = false): Promise<ElectionsResponse> {
-  return request(`/api/elections?zip=${encodeURIComponent(zipcode)}${deep ? '&deep=true' : ''}`)
+export function getElections(zipcode: string): Promise<ElectionsResponse> {
+  return request(`/api/elections?zip=${encodeURIComponent(zipcode)}`)
 }
 
 export function researchCandidates(body: {

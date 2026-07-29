@@ -90,7 +90,7 @@ def search_many(
         return {}
     results: dict[str, list[SearchResult]] = {}
     errors: dict[str, Exception] = {}
-    with ThreadPoolExecutor(max_workers=min(20, len(queries))) as executor:
+    with ThreadPoolExecutor(max_workers=min(40, len(queries))) as executor:
         future_to_query = {
             executor.submit(search, query, max_results_per_query, api_key, search_depth): query
             for query in queries

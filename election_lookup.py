@@ -678,33 +678,28 @@ _RACE_SEARCH_TERMS = {
 }
 
 
-def _race_search_queries(zipcode: str, office: str, deep: bool = False) -> "list[str]":
-    """3 queries in quick mode (fast fan-out, ~10-15s end to end) -- enough to
-    paint the page immediately. Deep mode runs 11, with Tavily's "advanced"
-    search depth (see find_local_elections_via_tavily), aimed specifically at
-    surfacing a COMPLETE candidate list rather than just the most prominent
-    name. This runs in the background after the page has already loaded, so
-    it's allowed to take longer (~40-60s) in exchange for real thoroughness."""
+def _race_search_queries(zipcode: str, office: str) -> "list[str]":
+    """11 queries per office, run concurrently against Tavily's "basic" (fast)
+    search depth -- broad query coverage for a complete candidate list,
+    without advanced depth's per-query slowness. See find_local_elections_via_tavily
+    for why breadth-of-queries + basic depth + full parallelism is the fast AND
+    thorough combination, rather than trading one off against the other."""
     terms = _RACE_SEARCH_TERMS[office]
     year = datetime.now(timezone.utc).year
     next_year = year + 1
-    queries = [
+    return [
         f"{zipcode} {terms} election candidates {year} {next_year}",
         f"{zipcode} {terms} election Ballotpedia",
         f"{zipcode} {terms} candidates Vote411 voter guide",
+        f"{zipcode} {terms} official candidate filing list",
+        f"{zipcode} {terms} who is running for election",
+        f"{zipcode} local election authority candidate list {terms}",
+        f"{zipcode} {terms} full list of candidates on the ballot",
+        f"{zipcode} {terms} candidates filed for {year} election",
+        f"{zipcode} {terms} primary election candidates {next_year}",
+        f"site:ballotpedia.org {zipcode} {terms} election",
+        f"{zipcode} {terms} incumbent challenger candidates news",
     ]
-    if deep:
-        queries += [
-            f"{zipcode} {terms} official candidate filing list",
-            f"{zipcode} {terms} who is running for election",
-            f"{zipcode} local election authority candidate list {terms}",
-            f"{zipcode} {terms} full list of candidates on the ballot",
-            f"{zipcode} {terms} candidates filed for {year} election",
-            f"{zipcode} {terms} primary election candidates {next_year}",
-            f"site:ballotpedia.org {zipcode} {terms} election",
-            f"{zipcode} {terms} incumbent challenger candidates news",
-        ]
-    return queries
 
 
 def _format_race_evidence_block(
@@ -833,21 +828,17 @@ def _looks_like_placeholder_name(name: str) -> bool:
 
 
 def find_local_elections_via_tavily(
-    zipcode: str, client: "anthropic.Anthropic | None" = None, deep: bool = False
+    zipcode: str, client: "anthropic.Anthropic | None" = None
 ) -> LookupResult:
     """Fast replacement for find_local_elections. See module note above.
 
-    Two-tier by design: deep=False (the default) runs a smaller, fast query
-    set -- aimed at ~10-15s end to end, good enough to paint the page
-    immediately. deep=True runs 11 queries per race with Tavily's "advanced"
-    search depth and a much bigger evidence/output budget, aimed at actually
-    finding a complete candidate list rather than just the most prominent
-    name -- real thoroughness, at the cost of being slow (~40-60s). The
-    intended caller pattern is: fetch quick first and show it right away,
-    then kick off a deep fetch in the background and merge in whatever new
-    candidates it finds -- see appData.tsx's searchElections on the frontend.
-    Deep mode is never on the critical path a user is staring at, so this
-    tradeoff is free from the user's perspective.
+    Runs a single, thorough search pass: 11 queries per office (33 total),
+    all fired concurrently, using Tavily's "basic" (fast) search depth rather
+    than "advanced". Query breadth is what actually finds a complete
+    candidate list -- "advanced" depth mainly makes each individual query
+    slower without adding coverage, so basic depth + more queries + full
+    parallelism gets both speed and exhaustiveness instead of trading one for
+    the other.
     """
     if client is None:
         if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -857,20 +848,19 @@ def find_local_elections_via_tavily(
             )
         client = anthropic.Anthropic()
 
-    queries_by_office = {office: _race_search_queries(zipcode, office, deep=deep) for office in OFFICES}
+    queries_by_office = {office: _race_search_queries(zipcode, office) for office in OFFICES}
     all_queries = [query for queries in queries_by_office.values() for query in queries]
     results_by_query = tavily_search.search_many(
         all_queries,
-        max_results_per_query=8 if deep else 4,
-        search_depth="advanced" if deep else "basic",
+        max_results_per_query=6,
+        search_depth="basic",
     )
 
-    evidence_limit = 30 if deep else 10
     evidence_block = "\n\n".join(
         _format_race_evidence_block(
             office,
             {query: results_by_query.get(query, []) for query in queries_by_office[office]},
-            limit=evidence_limit,
+            limit=20,
         )
         for office in OFFICES
     )
@@ -888,7 +878,7 @@ def find_local_elections_via_tavily(
     return _call_model_and_parse(
         client,
         prompt,
-        max_tokens=8000 if deep else 4000,
+        max_tokens=8000,
         refusal_subject=f"local elections for zip {zipcode}",
         parse=parse,
         use_web_search=False,

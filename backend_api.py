@@ -154,13 +154,13 @@ def get_questions() -> list[dict]:
 
 
 @app.get("/api/elections")
-def get_elections(zip: str, deep: bool = False) -> dict:
+def get_elections(zip: str) -> dict:
     zipcode = zip.strip()
     if not ZIP_PATTERN.match(zipcode):
         raise HTTPException(status_code=400, detail="Please provide a valid 5-digit US zip code.")
 
     try:
-        result = election_lookup.find_local_elections_via_tavily(zipcode, deep=deep)
+        result = election_lookup.find_local_elections_via_tavily(zipcode)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=_missing_key_message(exc)) from exc
     except Exception as exc:  # search/parsing failure -- surface, don't crash

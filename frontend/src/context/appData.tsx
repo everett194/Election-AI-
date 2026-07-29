@@ -23,9 +23,6 @@ interface ElectionsState {
   retrievedAt: string | null
   races: ApiRace[]
   error: string | null
-  /** Status of the slower, more thorough background search that runs after
-   * the fast initial results are already on screen -- see searchElections. */
-  deepStatus: FetchStatus
 }
 
 const EMPTY_ELECTIONS: ElectionsState = {
@@ -34,22 +31,6 @@ const EMPTY_ELECTIONS: ElectionsState = {
   retrievedAt: null,
   races: [],
   error: null,
-  deepStatus: 'idle',
-}
-
-/** Merges a deeper, more thorough race search into what's already on screen --
- * unions candidates by name per office (deep's version wins on overlap, but
- * nothing found by the quick pass is ever dropped) and takes the deep pass's
- * jurisdiction/date/notes, which are usually more complete. */
-function mergeRaces(base: ApiRace[], deep: ApiRace[]): ApiRace[] {
-  const deepByOffice = new Map(deep.map((race) => [race.office, race]))
-  return base.map((race) => {
-    const deepRace = deepByOffice.get(race.office)
-    if (!deepRace) return race
-    const candidatesByName = new Map(race.candidates.map((c) => [c.name, c]))
-    for (const candidate of deepRace.candidates) candidatesByName.set(candidate.name, candidate)
-    return { ...deepRace, candidates: Array.from(candidatesByName.values()) }
-  })
 }
 
 interface AppDataContextType {
@@ -142,7 +123,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
 
   const searchElections = useCallback(
     async (zipcode: string) => {
-      setElections({ status: 'loading', zipcode, retrievedAt: null, races: [], error: null, deepStatus: 'idle' })
+      setElections({ status: 'loading', zipcode, retrievedAt: null, races: [], error: null })
       setProfiles({})
       setRaceResearchStatus({})
       setRaceResearchError({})
@@ -157,7 +138,6 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
           retrievedAt: response.retrieved_at,
           races: response.races,
           error: null,
-          deepStatus: 'loading',
         })
 
         // Research every candidate found, right away, in the background --
@@ -172,34 +152,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
           retrievedAt: null,
           races: [],
           error: err instanceof api.ApiError ? err.message : 'Something went wrong loading elections.',
-          deepStatus: 'idle',
         })
-        return
-      }
-
-      // Fire the slower, more thorough race-discovery pass in the background
-      // too -- not awaited by this function's own promise, so callers see
-      // "loaded" as soon as the fast pass lands. Merges in when it finishes;
-      // failure here just means the quick results stand as-is, not a hard
-      // error.
-      try {
-        const deepResponse = await api.getElections(zipcode, true)
-        let racesNeedingResearch: ApiRace[] = []
-        setElections((prev) => {
-          if (prev.zipcode !== zipcode) return prev // a newer search superseded this one -- discard
-          const merged = mergeRaces(prev.races, deepResponse.races)
-          const prevCountByOffice = new Map(prev.races.map((r) => [r.office, r.candidates.length]))
-          racesNeedingResearch = merged.filter(
-            (r) => r.candidates.length > 0 && r.candidates.length !== prevCountByOffice.get(r.office),
-          )
-          return { ...prev, races: merged, deepStatus: 'loaded' }
-        })
-        // Only re-research races where the deep pass actually found new
-        // candidates -- avoids paying for a duplicate call when it found
-        // nothing the quick pass hadn't already covered.
-        void Promise.all(racesNeedingResearch.map((r) => researchRace(zipcode, r)))
-      } catch {
-        setElections((prev) => (prev.zipcode !== zipcode ? prev : { ...prev, deepStatus: 'error' }))
       }
     },
     [researchRace],

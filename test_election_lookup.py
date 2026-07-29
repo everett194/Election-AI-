@@ -444,7 +444,7 @@ def test_find_local_elections_via_tavily_fetches_evidence_then_synthesizes():
     assert result.races[1].candidates == []
 
 
-def test_find_local_elections_via_tavily_deep_mode_runs_more_queries():
+def test_find_local_elections_via_tavily_runs_broad_query_set_at_basic_depth():
     fake_client = MagicMock()
     fake_client.messages.create.return_value = _mock_response(COMBINED_RACES_EVIDENCE_JSON)
 
@@ -455,19 +455,15 @@ def test_find_local_elections_via_tavily_deep_mode_runs_more_queries():
         }
 
     with patch("election_lookup.tavily_search.search_many", side_effect=fake_search_many) as mock_search_many:
-        find_local_elections_via_tavily("62704", client=fake_client, deep=False)
-        quick_query_count = len(mock_search_many.call_args.args[0])
-        quick_kwargs = mock_search_many.call_args.kwargs
+        find_local_elections_via_tavily("62704", client=fake_client)
+        query_count = len(mock_search_many.call_args.args[0])
+        kwargs = mock_search_many.call_args.kwargs
 
-        find_local_elections_via_tavily("62704", client=fake_client, deep=True)
-        deep_query_count = len(mock_search_many.call_args.args[0])
-        deep_kwargs = mock_search_many.call_args.kwargs
-
-    # Deep mode runs strictly more queries per race than quick mode, and asks
-    # Tavily for its more thorough (slower) search depth.
-    assert deep_query_count > quick_query_count
-    assert quick_kwargs.get("search_depth") == "basic"
-    assert deep_kwargs.get("search_depth") == "advanced"
+    # 11 queries per office (mayor, county, us_house), all at Tavily's fast
+    # "basic" depth -- breadth of queries, not per-query depth, is what
+    # finds a complete candidate list quickly.
+    assert query_count == 33
+    assert kwargs.get("search_depth") == "basic"
 
 
 def test_find_local_elections_via_tavily_drops_placeholder_candidate_names():
