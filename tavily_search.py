@@ -17,12 +17,22 @@ through an AI assistant or commit it to the repo.
 from __future__ import annotations
 
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 import requests
 
 TAVILY_API_URL = "https://api.tavily.com/search"
+
+# A single race/candidate search fires 30+ Tavily queries concurrently, so a
+# burst that trips Tavily's rate limit is expected occasionally, not
+# exceptional -- retry those with backoff instead of failing the whole
+# search. Non-429 errors (bad request, auth failure, network blip) are not
+# retried; they're either not transient or already handled per-query by
+# search_many.
+_MAX_429_RETRIES = 3
+_BACKOFF_BASE_SECONDS = 1.5
 
 
 @dataclass
@@ -48,16 +58,20 @@ def search(
             "TAVILY_API_KEY is not set. Set it in your environment before "
             "searching (e.g. `export TAVILY_API_KEY=tvly-...`)."
         )
-    response = requests.post(
-        TAVILY_API_URL,
-        json={
-            "api_key": api_key,
-            "query": query,
-            "max_results": max_results,
-            "search_depth": search_depth,
-        },
-        timeout=30,
-    )
+    payload = {
+        "api_key": api_key,
+        "query": query,
+        "max_results": max_results,
+        "search_depth": search_depth,
+    }
+    response = requests.post(TAVILY_API_URL, json=payload, timeout=30)
+    attempt = 0
+    while response.status_code == 429 and attempt < _MAX_429_RETRIES:
+        retry_after = response.headers.get("Retry-After")
+        delay = float(retry_after) if retry_after else _BACKOFF_BASE_SECONDS * (2**attempt)
+        time.sleep(delay)
+        attempt += 1
+        response = requests.post(TAVILY_API_URL, json=payload, timeout=30)
     response.raise_for_status()
     data = response.json()
     return [
@@ -104,6 +118,12 @@ def search_many(
                 errors[query] = exc
     if errors and len(errors) == len(queries):
         sample = next(iter(errors.values()))
+        if "429" in str(sample):
+            raise RuntimeError(
+                f"Tavily rate limit exceeded even after retrying ({len(queries)} queries). "
+                "Wait a bit before searching again, or check your plan's rate limit at "
+                f"https://tavily.com. Sample error: {sample}"
+            )
         raise RuntimeError(
             f"Tavily search failed for all {len(queries)} queries -- check TAVILY_API_KEY "
             f"and your network connection. Sample error: {sample}"

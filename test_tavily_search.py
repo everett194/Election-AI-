@@ -1,14 +1,24 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from tavily_search import SearchResult, dedupe_by_url, search, search_many
 
 
-def _mock_post_response(results: list[dict]):
+def _mock_post_response(results: list[dict], status_code: int = 200):
     response = MagicMock()
+    response.status_code = status_code
     response.json.return_value = {"results": results}
     response.raise_for_status.return_value = None
+    return response
+
+
+def _mock_429_response():
+    response = MagicMock()
+    response.status_code = 429
+    response.headers = {}
+    response.raise_for_status.side_effect = requests.HTTPError("429 Client Error: Too Many Requests")
     return response
 
 
@@ -45,6 +55,37 @@ def test_search_raises_without_api_key(monkeypatch):
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     with pytest.raises(RuntimeError):
         search("some query")
+
+
+def test_search_retries_on_429_then_succeeds():
+    fake_results = [{"title": "Found it", "url": "https://example.com/a", "content": "text"}]
+    responses = [_mock_429_response(), _mock_429_response(), _mock_post_response(fake_results)]
+    with patch("tavily_search.requests.post", side_effect=responses) as mock_post, \
+         patch("tavily_search.time.sleep") as mock_sleep:
+        results = search("some query", api_key="test-key")
+
+    assert results == [SearchResult(title="Found it", url="https://example.com/a", content="text")]
+    assert mock_post.call_count == 3
+    assert mock_sleep.call_count == 2
+
+
+def test_search_raises_after_exhausting_429_retries():
+    with patch("tavily_search.requests.post", return_value=_mock_429_response()) as mock_post, \
+         patch("tavily_search.time.sleep"):
+        with pytest.raises(requests.HTTPError):
+            search("some query", api_key="test-key")
+
+    # Initial attempt + _MAX_429_RETRIES retries.
+    assert mock_post.call_count == 4
+
+
+def test_search_many_raises_with_rate_limit_message_on_429():
+    def fake_search(query, max_results=5, api_key=None, search_depth='basic'):
+        raise requests.HTTPError("429 Client Error: Too Many Requests for url: https://api.tavily.com/search")
+
+    with patch("tavily_search.search", side_effect=fake_search):
+        with pytest.raises(RuntimeError, match="rate limit exceeded"):
+            search_many(["query one"], api_key="test-key")
 
 
 def test_search_many_runs_every_query_and_keys_by_query():
