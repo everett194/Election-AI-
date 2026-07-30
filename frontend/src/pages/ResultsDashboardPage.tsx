@@ -1,67 +1,17 @@
 import { useEffect, useMemo, useState } from 'react'
-import {
-  RadarChart, Radar, PolarGrid, PolarAngleAxis,
-  ResponsiveContainer, Tooltip as RechartsTooltip, Legend,
-} from 'recharts'
 import { useNav } from '../context/nav'
 import { useAppData, candidateKey } from '../context/appData'
 import { ConfidenceIndicator } from '../components/Badges'
 import { Avatar } from '../components/Cards'
 import { Alert, EmptyState } from '../components/ui'
+import { ChartCard } from '../components/charts/ChartCard'
+import { CandidateSelector } from '../components/charts/CandidateSelector'
+import { IssueRadarChart } from '../components/charts/IssueRadarChart'
+import { IdeologicalCompassChart, CompassDetailsPanel } from '../components/charts/IdeologicalCompassChart'
+import { useCandidateSelection } from '../hooks/useCandidateSelection'
+import { buildCandidateColorMap } from '../lib/candidateColors'
 import { categoryLabelMap, confidenceBucket, initialsFor } from '../lib/derive'
 import type { CandidateResult } from '../api'
-
-const CANDIDATE_COLORS = ['#1a9e87', '#2d5fa0', '#c9922a', '#9D755D', '#B279A2']
-
-// ─── Compass SVG ─────────────────────────────────────────────────────────────
-// Quadrants + a crosshair that always spans the full domain, and every
-// candidate with any real position data gets plotted -- mirrors the fix
-// already validated in the Streamlit app's ideological compass chart.
-
-function CompassChart({ voter, candidates }: {
-  voter: { econ: number; social: number }
-  candidates: { name: string; econ: number; social: number; color: string }[]
-}) {
-  const S = 280
-  const PAD = 40
-  const DOMAIN = 120
-  const cvt = (v: number) => ((v + DOMAIN) / (DOMAIN * 2)) * (S - PAD * 2) + PAD
-
-  return (
-    <div className="flex flex-col items-center">
-      <svg width={S} height={S} aria-label="Ideological compass showing your position and candidate positions">
-        <rect x={PAD} y={PAD} width={(S - PAD * 2) / 2} height={(S - PAD * 2) / 2} fill="#eef3fb" opacity="0.5" />
-        <rect x={S / 2} y={S / 2} width={(S - PAD * 2) / 2} height={(S - PAD * 2) / 2} fill="#fdf3e0" opacity="0.4" />
-
-        <line x1={PAD} y1={S / 2} x2={S - PAD} y2={S / 2} stroke="#dde3ed" strokeWidth="1.5"/>
-        <line x1={S / 2} y1={PAD} x2={S / 2} y2={S - PAD} stroke="#dde3ed" strokeWidth="1.5"/>
-
-        <text x={S / 2} y={PAD - 8} textAnchor="middle" fill="#6b7a99" fontSize="9" fontWeight="600">MORE CIVIL LIBERTIES</text>
-        <text x={S / 2} y={S - PAD + 16} textAnchor="middle" fill="#6b7a99" fontSize="9" fontWeight="600">MORE AUTHORITY</text>
-        <text x={PAD - 6} y={S / 2} textAnchor="middle" fill="#6b7a99" fontSize="9" fontWeight="600"
-          transform={`rotate(-90 ${PAD - 6} ${S / 2})`}>PUBLIC INVESTMENT</text>
-        <text x={S - PAD + 6} y={S / 2} textAnchor="middle" fill="#6b7a99" fontSize="9" fontWeight="600"
-          transform={`rotate(90 ${S - PAD + 6} ${S / 2})`}>MARKETS</text>
-
-        <circle cx={cvt(voter.econ)} cy={cvt(-voter.social)} r="8" fill="#E45756" opacity="0.9"/>
-        <circle cx={cvt(voter.econ)} cy={cvt(-voter.social)} r="12" fill="#E45756" opacity="0.15"/>
-        <text x={cvt(voter.econ)} y={cvt(-voter.social) - 16} textAnchor="middle" fill="#E45756" fontSize="9" fontWeight="700">YOU</text>
-
-        {candidates.map((c) => {
-          const cx = cvt(c.econ)
-          const cy = cvt(-c.social)
-          return (
-            <g key={c.name}>
-              <circle cx={cx} cy={cy} r="11" fill={c.color} opacity="0.85"/>
-              <text x={cx} y={cy + 4} textAnchor="middle" fill="white" fontSize="8" fontWeight="700">{initialsFor(c.name)}</text>
-              <text x={cx} y={cy + 20} textAnchor="middle" fill="#0f2340" fontSize="8" fontWeight="500">{c.name.split(' ').slice(-1)[0]}</text>
-            </g>
-          )
-        })}
-      </svg>
-    </div>
-  )
-}
 
 // ─── Match card ───────────────────────────────────────────────────────────────
 
@@ -170,6 +120,7 @@ export default function ResultsDashboardPage() {
   const { results, resultsStatus, resultsError, questions, ensureQuestionsLoaded, computeResults } = useAppData()
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [showMethodology, setShowMethodology] = useState(false)
+  const [showCompassMethod, setShowCompassMethod] = useState(false)
 
   useEffect(() => {
     void ensureQuestionsLoaded()
@@ -177,6 +128,28 @@ export default function ResultsDashboardPage() {
 
   const toggle = (key: string) => setExpanded((prev) => ({ ...prev, [key]: !prev[key] }))
   const labels = useMemo(() => categoryLabelMap(questions), [questions])
+
+  const candidateColorMap = useMemo(
+    () => buildCandidateColorMap(results?.candidates ?? []),
+    [results],
+  )
+
+  const chartCandidates = useMemo(() => {
+    if (!results) return []
+    return results.candidates
+      .filter((c) => c.compatibility.question_count > 0 || c.compass !== null)
+      .map((c) => {
+        const key = candidateKey(c.office, c.name)
+        return {
+          key,
+          name: c.name,
+          matchPct: c.compatibility.overall_pct,
+          color: candidateColorMap.get(key) ?? '#6b7a99',
+        }
+      })
+  }, [results, candidateColorMap])
+
+  const selection = useCandidateSelection(chartCandidates)
 
   if (resultsStatus === 'idle') {
     return (
@@ -218,9 +191,17 @@ export default function ResultsDashboardPage() {
     return row
   })
 
+  const radarSeriesCandidates = rankedCandidates.map((c) => {
+    const key = candidateKey(c.office, c.name)
+    return { key, name: c.name, color: candidateColorMap.get(key) ?? '#6b7a99' }
+  })
+
   const compassCandidates = results.candidates
     .filter((c): c is CandidateResult & { compass: { econ: number; social: number } } => c.compass !== null)
-    .map((c, i) => ({ name: c.name, econ: c.compass.econ, social: c.compass.social, color: CANDIDATE_COLORS[i % CANDIDATE_COLORS.length] }))
+    .map((c) => {
+      const key = candidateKey(c.office, c.name)
+      return { key, name: c.name, econ: c.compass.econ, social: c.compass.social, color: candidateColorMap.get(key) ?? '#6b7a99' }
+    })
 
   return (
     <div className="min-h-screen bg-soft page-enter">
@@ -291,57 +272,93 @@ export default function ResultsDashboardPage() {
             </div>
           </div>
 
-          {/* Right column: charts + actions */}
-          <div className="space-y-6">
-            {rankedCandidates.length > 0 && (
-              <div className="bg-surface rounded-2xl border border-border p-5">
-                <h3 className="font-semibold text-navy text-sm mb-1" style={{ fontFamily: 'Fraunces, Georgia, serif' }}>
-                  Issue-by-issue alignment
-                </h3>
-                <p className="text-[10px] text-muted mb-4">How closely each candidate matches you, by category</p>
-                <ResponsiveContainer width="100%" height={240}>
-                  <RadarChart data={radarData} margin={{ top: 8, right: 16, bottom: 8, left: 16 }}>
-                    <PolarGrid stroke="#dde3ed" />
-                    <PolarAngleAxis dataKey="category" tick={{ fontSize: 9, fill: '#6b7a99' }} />
-                    {rankedCandidates.map((c, i) => (
-                      <Radar key={c.name} name={c.name} dataKey={c.name} stroke={CANDIDATE_COLORS[i % CANDIDATE_COLORS.length]} fill={CANDIDATE_COLORS[i % CANDIDATE_COLORS.length]} fillOpacity={0.15} />
-                    ))}
-                    <RechartsTooltip contentStyle={{ fontSize: 11, borderRadius: 10, border: '1px solid #dde3ed' }} />
-                    <Legend wrapperStyle={{ fontSize: 11 }} />
-                  </RadarChart>
-                </ResponsiveContainer>
-              </div>
-            )}
-
-            {compassCandidates.length > 0 && (
-              <div className="bg-surface rounded-2xl border border-border p-5">
-                <h3 className="font-semibold text-navy text-sm mb-1" style={{ fontFamily: 'Fraunces, Georgia, serif' }}>
-                  Ideological compass
-                </h3>
-                <p className="text-[10px] text-muted mb-4">Your estimated position vs. candidates on two axes</p>
-                <CompassChart voter={results.voter_compass} candidates={compassCandidates} />
-                <p className="text-xs text-muted leading-relaxed mt-3">
-                  Compass positions are estimated from your and each candidate's answers to the same 20 questions. Axes reflect economic policy (public investment vs. markets) and social governance approach (authority vs. civil liberties) — not partisan affiliation.
-                </p>
-              </div>
-            )}
-
-            <div className="space-y-2.5">
-              <button
-                onClick={() => navigate('quiz')}
-                className="w-full py-3 rounded-xl border border-border text-muted text-sm font-medium hover:text-navy hover:border-border-strong transition-colors"
-              >
-                Retake questionnaire
-              </button>
-              <button
-                onClick={() => navigate('elections')}
-                className="w-full py-3 rounded-xl bg-navy text-white text-sm font-semibold hover:bg-navy-mid transition-colors"
-              >
-                Back to all races
-              </button>
-            </div>
+          {/* Right column: actions */}
+          <div className="space-y-2.5">
+            <button
+              onClick={() => navigate('quiz')}
+              className="w-full py-3 rounded-xl border border-border text-muted text-sm font-medium hover:text-navy hover:border-border-strong transition-colors"
+            >
+              Retake questionnaire
+            </button>
+            <button
+              onClick={() => navigate('elections')}
+              className="w-full py-3 rounded-xl bg-navy text-white text-sm font-semibold hover:bg-navy-mid transition-colors"
+            >
+              Back to all races
+            </button>
           </div>
         </div>
+
+        {(rankedCandidates.length > 0 || compassCandidates.length > 0) && (
+          <div className="mt-10">
+            <h2 className="font-semibold text-navy text-lg mb-1" style={{ fontFamily: 'Fraunces, Georgia, serif' }}>
+              Compare candidates visually
+            </h2>
+            <p className="text-sm text-muted leading-relaxed mb-5 max-w-2xl">
+              Choose which candidates to compare below — your selection stays in sync between both charts.
+            </p>
+
+            <div className="grid lg:grid-cols-2 gap-6">
+              {rankedCandidates.length > 0 && (
+                <ChartCard title="Issue-by-issue alignment" subtitle="How closely each candidate matches you, by category">
+                  {(variant) => (
+                    <div className={variant === 'modal' ? 'grid md:grid-cols-[1fr_240px] gap-5 items-start' : 'grid lg:grid-cols-[1fr_220px] gap-4 items-start'}>
+                      <IssueRadarChart
+                        data={radarData}
+                        candidates={radarSeriesCandidates}
+                        selectedKeys={selection.selectedKeys}
+                        activeKey={selection.activeKey}
+                        onHoverCandidate={selection.setHovered}
+                        onTogglePinned={selection.togglePinned}
+                        variant={variant}
+                      />
+                      <CandidateSelector candidates={chartCandidates} selection={selection} />
+                    </div>
+                  )}
+                </ChartCard>
+              )}
+
+              {compassCandidates.length > 0 && (
+                <ChartCard title="Ideological compass" subtitle="Your estimated position vs. candidates on two axes">
+                  {(variant) => (
+                    <div className={variant === 'modal' ? 'grid md:grid-cols-[1fr_220px] gap-5 items-start' : 'grid lg:grid-cols-[1fr_200px] gap-4 items-start'}>
+                      <IdeologicalCompassChart
+                        voter={results.voter_compass}
+                        candidates={compassCandidates}
+                        selectedKeys={selection.selectedKeys}
+                        activeKey={selection.activeKey}
+                        onHoverCandidate={selection.setHovered}
+                        onTogglePinned={selection.togglePinned}
+                        variant={variant}
+                      />
+                      <CompassDetailsPanel
+                        candidates={compassCandidates}
+                        selectedKeys={selection.selectedKeys}
+                        activeKey={selection.activeKey}
+                        voter={results.voter_compass}
+                      />
+                    </div>
+                  )}
+                </ChartCard>
+              )}
+            </div>
+
+            <div className="mt-4 max-w-2xl">
+              <button
+                type="button"
+                onClick={() => setShowCompassMethod(!showCompassMethod)}
+                className="text-xs text-civic hover:text-civic-light font-medium underline underline-offset-2"
+              >
+                How compass positions are calculated
+              </button>
+              {showCompassMethod && (
+                <p className="text-xs text-muted leading-relaxed mt-2 max-w-lg">
+                  Compass positions are estimated from your and each candidate's answers to the same 20 questions. The horizontal axis reflects economic policy (public investment vs. markets); the vertical axis reflects social governance approach (authority vs. civil liberties). These are not measures of partisan affiliation.
+                </p>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
