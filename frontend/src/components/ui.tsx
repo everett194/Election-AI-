@@ -158,18 +158,51 @@ interface ModalProps {
   onClose: () => void
   title: string
   children: ReactNode
-  size?: 'sm' | 'md' | 'lg'
+  size?: 'sm' | 'md' | 'lg' | 'xl'
 }
 
-const MODAL_SIZES = { sm: 'max-w-sm', md: 'max-w-lg', lg: 'max-w-2xl' }
+const MODAL_SIZES = { sm: 'max-w-sm', md: 'max-w-lg', lg: 'max-w-2xl', xl: 'max-w-6xl' }
+
+const FOCUSABLE_SELECTOR = 'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])'
 
 export function Modal({ open, onClose, title, children, size = 'md' }: ModalProps) {
   const overlayRef = useRef<HTMLDivElement>(null)
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const previouslyFocused = useRef<HTMLElement | null>(null)
 
   useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    if (open) document.addEventListener('keydown', handleKey)
-    return () => document.removeEventListener('keydown', handleKey)
+    if (!open) return
+
+    previouslyFocused.current = document.activeElement as HTMLElement | null
+    const dialog = dialogRef.current
+    const focusable = dialog?.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)
+    if (focusable && focusable.length > 0) focusable[0].focus()
+    else dialog?.focus()
+
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose()
+        return
+      }
+      if (e.key !== 'Tab' || !dialog) return
+      const items = dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)
+      if (items.length === 0) return
+      const first = items[0]
+      const last = items[items.length - 1]
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault()
+        first.focus()
+      }
+    }
+
+    document.addEventListener('keydown', handleKey)
+    return () => {
+      document.removeEventListener('keydown', handleKey)
+      previouslyFocused.current?.focus()
+    }
   }, [open, onClose])
 
   if (!open) return null
@@ -180,9 +213,16 @@ export function Modal({ open, onClose, title, children, size = 'md' }: ModalProp
       className="fixed inset-0 z-[100] bg-navy/40 backdrop-blur-sm flex items-center justify-center p-4"
       onClick={(e) => { if (e.target === overlayRef.current) onClose() }}
     >
-      <div className={`${MODAL_SIZES[size]} w-full bg-surface rounded-2xl shadow-2xl border border-border overflow-hidden`}>
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="modal-title"
+        tabIndex={-1}
+        className={`${MODAL_SIZES[size]} w-full bg-surface rounded-2xl shadow-2xl border border-border overflow-hidden`}
+      >
         <div className="flex items-center justify-between px-6 py-4 border-b border-border">
-          <h3 className="font-semibold text-navy text-base" style={{ fontFamily: 'Fraunces, Georgia, serif' }}>
+          <h3 id="modal-title" className="font-semibold text-navy text-base" style={{ fontFamily: 'Fraunces, Georgia, serif' }}>
             {title}
           </h3>
           <button
