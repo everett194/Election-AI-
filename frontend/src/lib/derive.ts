@@ -55,3 +55,14 @@ export function allSourcesFor(profile: CandidateProfile | undefined): ApiSource[
 }
 
 export const CONFIDENCE_LABELS = ['Very limited', 'Limited', 'Moderate', 'Good', 'Comprehensive']
+
+export function interpretCompassPosition(econ: number, social: number): string {
+  if (Math.abs(econ) < 15 && Math.abs(social) < 15) {
+    return 'Close to the center on both axes — no strong lean either way.'
+  }
+  const econLabel = econ >= 0 ? 'markets' : 'public investment'
+  const socialLabel = social >= 0 ? 'civil liberties' : 'authority'
+  const econStrength = Math.abs(econ) >= 40 ? 'strongly' : Math.abs(econ) >= 15 ? 'moderately' : 'only slightly'
+  const socialStrength = Math.abs(social) >= 40 ? 'strongly' : Math.abs(social) >= 15 ? 'moderately' : 'only slightly'
+  return `Leans ${econStrength} toward ${econLabel} and ${socialStrength} toward ${socialLabel}.`
+}
