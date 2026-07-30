@@ -47,7 +47,7 @@ export function IdeologicalCompassChart({
       <svg
         viewBox={`0 0 ${VB} ${VB}`}
         className="w-full h-auto"
-        role="img"
+        role="group"
         aria-label="Ideological compass showing your position and candidate positions"
       >
         <rect x={PAD} y={PAD} width={(VB - PAD * 2) / 2} height={(VB - PAD * 2) / 2} fill="#eef3fb" opacity="0.5" />
