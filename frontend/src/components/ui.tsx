@@ -5,6 +5,7 @@
  */
 
 import { useState, useRef, useEffect, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 
 // ─── Button ──────────────────────────────────────────────────────────────────
 
@@ -209,7 +210,7 @@ export function Modal({ open, onClose, title, children, size = 'md' }: ModalProp
 
   if (!open) return null
 
-  return (
+  return createPortal(
     <div
       ref={overlayRef}
       className="fixed inset-0 z-[100] bg-navy/40 backdrop-blur-sm flex items-center justify-center p-4"
@@ -239,7 +240,8 @@ export function Modal({ open, onClose, title, children, size = 'md' }: ModalProp
         </div>
         <div className="p-6">{children}</div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
 
