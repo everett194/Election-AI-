@@ -70,10 +70,10 @@ export function CandidateSelector({ candidates, selection }: CandidateSelectorPr
                 onMouseLeave={() => selection.setHovered(null)}
               >
                 <input
-                  id={`candidate-check-${c.key}`}
                   type="checkbox"
                   checked={checked}
                   onChange={() => selection.toggleSelected(c.key)}
+                  aria-label={c.name}
                   className="w-4 h-4 rounded border-border-strong accent-civic shrink-0"
                 />
                 <span
@@ -86,13 +86,13 @@ export function CandidateSelector({ candidates, selection }: CandidateSelectorPr
                   onClick={() => selection.togglePinned(c.key)}
                   onFocus={() => selection.setHovered(c.key)}
                   onBlur={() => selection.setHovered(null)}
-                  aria-pressed={active}
+                  aria-pressed={selection.pinnedKey === c.key}
                   aria-label={`Highlight ${c.name} in both charts`}
                   className="flex-1 flex items-center justify-between gap-2 min-w-0 text-left"
                 >
-                  <label htmlFor={`candidate-check-${c.key}`} className="text-xs text-navy truncate pointer-events-none">
+                  <span className="text-xs text-navy truncate" title={c.name}>
                     {c.name}
-                  </label>
+                  </span>
                   {c.matchPct !== null && (
                     <span className="text-[10px] font-mono text-muted shrink-0">~{Math.round(c.matchPct)}%</span>
                   )}

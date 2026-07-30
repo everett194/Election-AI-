@@ -19,6 +19,7 @@ export interface UseCandidateSelectionResult {
   setHovered: (key: string | null) => void
   togglePinned: (key: string) => void
   defaultKeys: string[]
+  pinnedKey: string | null
 }
 
 const MAX_DEFAULT = 5
@@ -73,5 +74,6 @@ export function useCandidateSelection(candidates: SelectableCandidate[]): UseCan
     setHovered: setHoveredKey,
     togglePinned,
     defaultKeys,
+    pinnedKey,
   }
 }
