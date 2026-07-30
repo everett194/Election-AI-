@@ -299,7 +299,7 @@ export default function ResultsDashboardPage() {
             </p>
 
             <div className="grid lg:grid-cols-2 gap-6">
-              {rankedCandidates.length > 0 && (
+              {chartCandidates.length > 0 && (
                 <ChartCard title="Issue-by-issue alignment" subtitle="How closely each candidate matches you, by category">
                   {(variant) => (
                     <div className={variant === 'modal' ? 'grid md:grid-cols-[1fr_240px] gap-5 items-start' : 'grid lg:grid-cols-[1fr_220px] gap-4 items-start'}>
