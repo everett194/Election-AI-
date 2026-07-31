@@ -24,6 +24,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+import answer_storage
 import election_lookup
 from election_lookup import Candidate as BackendCandidate
 from questionnaire_scoring import (
@@ -229,6 +230,8 @@ class ResultsRequest(BaseModel):
 
 @app.post("/api/results")
 def get_results(body: ResultsRequest) -> dict:
+    answer_storage.save_submission(body.answers, body.importance)
+
     radar = compute_radar_scores(body.importance)
     voter_econ, voter_social = compute_compass_scores(body.answers)
 

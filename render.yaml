@@ -12,3 +12,5 @@ services:
         sync: false
       - key: CORS_ORIGINS
         value: https://electmatch.com,https://www.electmatch.com
+      - key: DATABASE_URL
+        sync: false
