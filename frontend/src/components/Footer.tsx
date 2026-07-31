@@ -49,7 +49,7 @@ export default function Footer() {
                 <polygon points="14,2 25,8 25,20 14,26 3,20 3,8" fill="#2d5fa0" stroke="#4a7ec9" strokeWidth="1"/>
                 <path d="M9 14l3 3 7-7" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
               </svg>
-              <span className="text-white font-bold text-[1.05rem]" style={{ fontFamily: 'Fraunces, Georgia, serif' }}>VoteLocal</span>
+              <span className="text-white font-bold text-[1.05rem]" style={{ fontFamily: 'Fraunces, Georgia, serif' }}>ElectMatch</span>
             </button>
             <p className="text-sm leading-relaxed text-blue-200/60">
               Nonpartisan civic-technology for local elections. Helping you understand who represents your community.
@@ -78,8 +78,8 @@ export default function Footer() {
 
         <div className="border-t border-white/8 pt-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
           <p className="text-xs text-blue-200/40 max-w-xl leading-relaxed">
-            © 2025 VoteLocal · Candidate information comes from an automated public web search and is not guaranteed
-            complete or error-free. VoteLocal does not endorse any candidate or party.
+            © 2025 ElectMatch · Candidate information comes from an automated public web search and is not guaranteed
+            complete or error-free. ElectMatch does not endorse any candidate or party.
           </p>
           <div className="flex gap-2 shrink-0">
             {[

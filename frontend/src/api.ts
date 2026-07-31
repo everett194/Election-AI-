@@ -1,5 +1,5 @@
 /**
- * Fetch client for the VoteLocal backend (backend_api.py). This is the only
+ * Fetch client for the ElectMatch backend (backend_api.py). This is the only
  * module that talks to the network -- pages call the functions here rather
  * than fetching directly, so there's one place that knows the API shape.
  *
@@ -26,7 +26,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
     })
   } catch {
-    throw new ApiError(0, 'Could not reach the VoteLocal server. Check your connection and try again.')
+    throw new ApiError(0, 'Could not reach the ElectMatch server. Check your connection and try again.')
   }
 
   if (!response.ok) {

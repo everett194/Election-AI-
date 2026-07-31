@@ -1,7 +1,7 @@
 """
 backend_api.py
 
-JSON API for the VoteLocal frontend (frontend/). Wraps election_lookup.py
+JSON API for the ElectMatch frontend (frontend/). Wraps election_lookup.py
 and questionnaire_scoring.py directly -- no logic is duplicated here, this
 module only adapts existing functions to HTTP request/response shapes.
 
@@ -34,7 +34,7 @@ from questionnaire_scoring import (
     compute_radar_scores,
 )
 
-app = FastAPI(title="VoteLocal API")
+app = FastAPI(title="ElectMatch API")
 
 _default_origins = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8443,http://127.0.0.1:8443"
 app.add_middleware(

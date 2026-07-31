@@ -112,9 +112,9 @@ def render_result(result: LookupResult) -> None:
         render_race(office, by_office.get(office), result.zipcode)
 
 
-st.title("VoteLocal")
+st.title("ElectMatch")
 st.write(
-    "VoteLocal finds the local elections on your next ballot -- mayor, county, "
+    "ElectMatch finds the local elections on your next ballot -- mayor, county, "
     "and U.S. House -- for any U.S. zip code, researches what's publicly known "
     "about each candidate's positions, and lets you take a 20-question issues "
     "questionnaire to see how your own views compare to every candidate running, "

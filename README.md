@@ -1,4 +1,4 @@
-# VoteLocal
+# ElectMatch
 
 Find your local elections, research candidates, and see how your own views
 compare to theirs on a 20-question local-issues questionnaire.

@@ -277,7 +277,7 @@ export default function CandidateProfilePage() {
           <div className="space-y-5">
             <EmptyState
               title="Biography not available"
-              description="VoteLocal's automated research does not currently produce candidate biographies. Check the candidate's campaign site or official voter guide for background information."
+              description="ElectMatch's automated research does not currently produce candidate biographies. Check the candidate's campaign site or official voter guide for background information."
             />
           </div>
         )}
@@ -287,7 +287,7 @@ export default function CandidateProfilePage() {
           <div className="space-y-5">
             <EmptyState
               title="Campaign finance data not available"
-              description="VoteLocal does not currently pull campaign finance filings. Check your county or state elections office for official filings."
+              description="ElectMatch does not currently pull campaign finance filings. Check your county or state elections office for official filings."
             />
           </div>
         )}

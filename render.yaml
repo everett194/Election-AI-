@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: votelocal-api
+    name: electmatch-api
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt

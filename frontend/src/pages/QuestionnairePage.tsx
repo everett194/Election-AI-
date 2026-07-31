@@ -109,7 +109,7 @@ export default function QuestionnairePage() {
   if (questionsStatus === 'error' || questions.length === 0) {
     return (
       <div className="min-h-screen bg-soft flex items-center justify-center p-4 text-center">
-        <p className="text-sm text-red-700">Could not load the questionnaire. Check that the VoteLocal server is running.</p>
+        <p className="text-sm text-red-700">Could not load the questionnaire. Check that the ElectMatch server is running.</p>
       </div>
     )
   }

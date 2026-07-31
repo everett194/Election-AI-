@@ -20,7 +20,7 @@ function DashboardPreview() {
           <svg viewBox="0 0 12 12" fill="currentColor" className="w-2.5 h-2.5 text-blue-300/40">
             <path fillRule="evenodd" clipRule="evenodd" d="M6 1a5 5 0 100 10A5 5 0 006 1zm-.5 3a.5.5 0 011 0v1.5H8a.5.5 0 010 1H5.5V4z"/>
           </svg>
-          <span className="text-[9px] text-blue-300/50 font-mono">votelocal.org/elections</span>
+          <span className="text-[9px] text-blue-300/50 font-mono">electmatch.com/elections</span>
         </div>
       </div>
 
@@ -29,7 +29,7 @@ function DashboardPreview() {
         <div className="bg-[#0f2340] rounded-lg px-3 py-2 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="w-4 h-4 bg-[#2d5fa0] rounded-sm" />
-            <span className="text-white text-[10px] font-bold" style={{ fontFamily: 'Fraunces, serif' }}>VoteLocal</span>
+            <span className="text-white text-[10px] font-bold" style={{ fontFamily: 'Fraunces, serif' }}>ElectMatch</span>
           </div>
           <div className="flex gap-2 text-[9px] text-blue-300/70">
             <span>Elections</span><span>Candidates</span>

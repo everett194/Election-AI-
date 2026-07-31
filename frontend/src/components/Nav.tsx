@@ -32,7 +32,7 @@ export default function Nav() {
           <button
             onClick={() => navigate('home')}
             className="flex items-center gap-2.5 group flex-shrink-0"
-            aria-label="VoteLocal home"
+            aria-label="ElectMatch home"
           >
             {/* Hexagon civic mark */}
             <svg viewBox="0 0 28 28" fill="none" className="w-7 h-7">
@@ -48,7 +48,7 @@ export default function Nav() {
               className="text-white font-bold text-[1.05rem] tracking-tight leading-none"
               style={{ fontFamily: 'Fraunces, Georgia, serif' }}
             >
-              VoteLocal
+              ElectMatch
             </span>
           </button>
 

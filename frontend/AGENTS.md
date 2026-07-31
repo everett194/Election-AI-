@@ -1,6 +1,6 @@
-# VoteLocal frontend
+# ElectMatch frontend
 
-React + Vite + Tailwind CSS frontend for VoteLocal. Originally exported from
+React + Vite + Tailwind CSS frontend for ElectMatch. Originally exported from
 Figma Make as a static design demo (fictional placeholder data throughout);
 now wired to the real backend in `../` (see `../election_lookup.py`,
 `../questionnaire_scoring.py`, and `../backend/app.py`).
