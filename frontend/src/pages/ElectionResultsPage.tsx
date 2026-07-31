@@ -94,9 +94,14 @@ export default function ElectionResultsPage() {
         )}
 
         {elections.status === 'loading' && (
-          <div className="grid md:grid-cols-2 gap-5">
-            {[1, 2, 3].map((i) => <RaceCardSkeleton key={i} />)}
-          </div>
+          <>
+            <p className="text-sm text-muted mb-4">
+              Searching for local elections — this can take up to 30 seconds.
+            </p>
+            <div className="grid md:grid-cols-2 gap-5">
+              {[1, 2, 3].map((i) => <RaceCardSkeleton key={i} />)}
+            </div>
+          </>
         )}
 
         {elections.status === 'error' && (

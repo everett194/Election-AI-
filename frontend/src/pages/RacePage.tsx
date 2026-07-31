@@ -2,7 +2,7 @@ import { useEffect } from 'react'
 import { useNav } from '../context/nav'
 import { useAppData, candidateKey } from '../context/appData'
 import { CandidateCard } from '../components/Cards'
-import { EmptyState } from '../components/ui'
+import { Alert, EmptyState } from '../components/ui'
 import { categoryLabelMap, confidenceBucket, initialsFor, issueTagsFor } from '../lib/derive'
 import type { Office } from '../api'
 
@@ -96,6 +96,14 @@ export default function RacePage() {
         {researchFailed && (
           <div className="mb-6 p-4 rounded-xl bg-amber-50 border border-amber-200 text-sm text-amber-800">
             {raceResearchError[race.office] ?? 'Candidate research failed.'}
+          </div>
+        )}
+
+        {researching && (
+          <div className="mb-6">
+            <Alert type="info">
+              Researching {race.candidates.length} candidate{race.candidates.length === 1 ? '' : 's'}' positions — this typically takes 30–60 seconds for races with several candidates. Feel free to keep browsing; each card fills in automatically.
+            </Alert>
           </div>
         )}
 

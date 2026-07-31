@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { NavContext } from './context/nav'
 import { AppDataProvider } from './context/appData'
 import type { PageName } from './types'
@@ -25,6 +25,16 @@ const PAGE_COMPONENTS: Record<PageName, React.ComponentType> = {
 // Pages that don't show the main footer (quiz is full-screen)
 const HIDE_FOOTER: PageName[] = []
 
+const PAGE_TITLES: Record<PageName, string> = {
+  home: 'ElectMatch — Know who represents your community',
+  elections: 'Elections',
+  race: 'Race',
+  candidate: 'Candidate',
+  comparison: 'Compare Candidates',
+  quiz: 'Take the Quiz',
+  results: 'Your Results',
+}
+
 export default function App() {
   const [page, setPage] = useState<PageName>('home')
   const [params, setParams] = useState<Record<string, string>>({})
@@ -34,6 +44,18 @@ export default function App() {
     setParams(newParams ?? {})
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
+
+  useEffect(() => {
+    const specificTitle =      (page === 'candidate' && params.name) ||
+      (page === 'race' && params.office) ||
+      null
+    const base = PAGE_TITLES[page]
+    document.title = page === 'home'
+      ? base
+      : specificTitle
+        ? `${specificTitle} | ElectMatch`
+        : `${base} | ElectMatch`
+  }, [page, params])
 
   const PageComponent = PAGE_COMPONENTS[page]
 
