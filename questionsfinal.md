@@ -215,3 +215,35 @@ No—keep boards appointed.
 
 4–5:
 Yes—let voters choose.
+
+Scoring & Verification Methodology
+
+1. Scoring the seven-axis radar chart
+
+The radar chart shows local-policy priorities, so each axis should represent how much the voter cares about that category, not the direction of their views (a radar axis communicates magnitude far better than a signed lean).
+
+For each of the 7 categories, take the voter’s importance ratings (1–5) on every question in that category.
+
+Average them, then rescale to 0–100:
+
+category score = 100 × (average importance - 1) / 4
+
+Plot the 7 category scores as the radar chart axes.
+
+Optionally pair the radar chart with a secondary indicator (color scale, icon, or small paired bar chart) per axis showing the voter’s average directional lean in that category, since a single radar line cannot legibly encode both magnitude and sign.
+
+2. Scoring the two-axis ideological compass
+
+For each axis (economic; social/institutional), use only the questions with a non-zero weight on that axis:
+
+Convert each answer (1–5) to a position value from -1 to +1:
+
+position = (answer - 3) / 2
+
+Multiply by that question’s axis weight (0–2) to get its contribution:
+
+contribution = weight × position
+
+Calculate the axis score:
+
+axis score =
