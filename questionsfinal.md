@@ -246,4 +246,30 @@ contribution = weight × position
 
 Calculate the axis score:
 
-axis score =
+axis score = sum(contributions) / sum(weights used), producing a result on the same −2..+2 scale as the individual weights. Rescale to −100..+100 for display if desired.
+
+Recommendation: compute compass placement from policy position only, not importance. Reserve importance weighting for the compatibility score below — this keeps the compass comparable across voters regardless of how engaged they are with any one topic, while still letting personal priorities drive the candidate match.
+
+3. Voter–candidate compatibility
+
+Compatibility should be calculated per race, using only questions where a verified candidate position exists.
+
+For each qualifying question, express both the voter's answer and the candidate's position on the same 1–5 scale (maximum possible distance = 4).
+
+Per-question compatibility: compatibility = 1 - (abs(voter answer - candidate position) / 4).
+
+Weight each question by the voter's importance rating (map 1–5 directly).
+
+overall compatibility % = 100 × sum(weight × compatibility) / sum(weight).
+
+Report the same weighted average broken out by radar category and by compass axis, so the site can explain why a match scored as it did, not just the final number.
+
+Never substitute a neutral (3) or zero-weight value for a candidate position that is simply unknown — exclude that question from both the numerator and denominator for that candidate rather than silently penalizing or crediting them.
+
+4. Hide questions that do not apply to the voter's jurisdiction
+
+Several questions above are only meaningful where the referenced office or policy lever exists locally. Showing and scoring an inapplicable question misleads the voter about what local officials actually control, and it injects noise into both the radar chart and the compass. Maintain a jurisdiction-metadata table and use it to programmatically filter which questions are shown and scored for each voter; do not default a hidden question to neutral in scoring — simply exclude it, the same as an unanswered question. See questionnaire.md for full show-if conditions and office mappings per question.
+
+5. Verifying candidate positions
+
+This framework defines only the voter-facing questionnaire and scoring logic. No candidate positions should ever be invented, assumed, or inferred from party affiliation, endorsements, or general reputation. Populate candidate positions only from sourced, checkable material — official government records, direct candidate responses to this questionnaire, established third-party candidate questionnaires (League of Women Voters/Vote411, Ballotpedia's Candidate Connection), campaign materials and public statements, voting/decision histories for incumbents, and reputable local reporting. Attach a visible source citation and last-verified date to every candidate position shown to voters. If no credible source exists for a given question, display the position as "not available" and exclude that question from the compatibility calculation for that candidate rather than guessing. Re-verify positions close to each election. See questionnaire.md Section 5 for full detail.

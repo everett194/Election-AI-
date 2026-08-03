@@ -2,7 +2,7 @@
 questionnaire_ui.py
 
 Rendering for the 20-question local-issues questionnaire from
-local-election-questionnaire.pdf / questionnaire.md. Called inline from
+questionsfinal.md / questionnaire.md. Called inline from
 streamlitrun.py -- not a separate page. Computes the voter's 7-category
 radar chart and 2-axis ideological compass from their own answers, then
 overlays EVERY candidate found for the zip code so the voter can see where
