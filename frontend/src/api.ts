@@ -90,7 +90,6 @@ export interface ApiQuestion {
   text: string
   approach_1: string
   approach_2: string
-  is_core: boolean
   selection_priority: number
   research_terms: string[]
 }
@@ -112,6 +111,7 @@ export interface CandidateProfile {
   coverage: { total_questions: number; answered: number; sourced: number; speculative: number }
   categories_covered: string[]
   compass: { econ: number; social: number; has_econ: boolean; has_social: boolean }
+  emphasis: Record<string, number>
 }
 
 export interface ResearchResponse {
@@ -152,15 +152,15 @@ export function researchCandidates(body: {
   office: Office
   jurisdiction_name: string
   candidates: { name: string; party: string | null; incumbent: boolean | null }[]
-  selected_categories?: string[]
+  ranked_categories?: string[]
 }): Promise<ResearchResponse> {
   return request('/api/candidates/research', { method: 'POST', body: JSON.stringify(body) })
 }
 
 export function getResults(body: {
   answers: Record<string, number>
-  selected_categories: string[]
-  candidates: { name: string; office: Office; positions: Record<string, number> }[]
+  ranked_categories: string[]
+  candidates: { name: string; office: Office; positions: Record<string, number>; emphasis: Record<string, number> }[]
 }): Promise<ResultsResponse> {
   return request('/api/results', { method: 'POST', body: JSON.stringify(body) })
 }
