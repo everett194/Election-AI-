@@ -23,9 +23,7 @@ class Question:
     text: str
     approach_1: str
     approach_2: str
-    # Metadata for the personalized-questionnaire flow (see build_active_questions):
-    is_core: bool = False  # one of the 5 baseline questions every voter answers
-    selection_priority: int = 0  # lower = picked first as an additional question in its category
+    selection_priority: int = 0  # lower = picked first in ranked categories
     research_terms: tuple[str, ...] = field(default_factory=tuple)  # extra Tavily query terms
 
 
@@ -48,7 +46,6 @@ QUESTIONS: list[Question] = [
         text="Should more apartments and duplexes be allowed?",
         approach_1="No—protect existing neighborhoods.",
         approach_2="Yes—allow more housing.",
-        is_core=True,
         selection_priority=1,
         research_terms=("zoning reform", "upzoning", "duplexes", "multifamily housing"),
     ),
@@ -82,7 +79,6 @@ QUESTIONS: list[Question] = [
         text="Should taxes rise to protect public services?",
         approach_1="Yes—maintain public services.",
         approach_2="No—keep taxes lower.",
-        is_core=True,
         selection_priority=1,
         research_terms=("property tax levy", "tax increase"),
     ),
@@ -127,7 +123,6 @@ QUESTIONS: list[Question] = [
         text="Where should public-safety funding go?",
         approach_1="More police funding.",
         approach_2="More community and crisis programs.",
-        is_core=True,
         selection_priority=1,
         research_terms=("police budget", "public safety funding"),
     ),
@@ -150,7 +145,6 @@ QUESTIONS: list[Question] = [
         text="Should school funding rise if taxes must rise?",
         approach_1="Yes—fund schools more.",
         approach_2="No—keep school taxes lower.",
-        is_core=True,
         selection_priority=1,
         research_terms=("school funding levy", "education budget"),
     ),
@@ -250,7 +244,6 @@ QUESTIONS: list[Question] = [
         text="Should major decisions require more public input?",
         approach_1="No—make decisions faster.",
         approach_2="Yes—allow more public input.",
-        is_core=True,
         selection_priority=1,
         research_terms=("public input", "community engagement"),
     ),
@@ -269,47 +262,39 @@ QUESTIONS: list[Question] = [
 
 QUESTIONS_BY_ID: dict[str, Question] = {q.id: q for q in QUESTIONS}
 
-MAX_ACTIVE_QUESTIONS = 12
-MAX_ADDITIONAL_PER_CATEGORY = 2
 
-RADAR_SELECTED_SCORE = 100.0
-RADAR_ANSWERED_SCORE = 40.0
-RADAR_UNREPRESENTED_SCORE = 0.0
-
-
-def build_active_questions(selected_categories: Iterable[str]) -> list[Question]:
-    """Builds the personalized questionnaire for a voter who picked
-    `selected_categories` (1-4 of the 7 category ids) as their priorities.
-
-    Always includes the 5 core questions (see Question.is_core), then adds up
-    to MAX_ADDITIONAL_PER_CATEGORY questions per selected category (ordered by
-    Question.selection_priority), never exceeding MAX_ACTIVE_QUESTIONS total.
-
-    Category order follows CATEGORY_LABELS' fixed iteration order rather than
-    the order the voter selected them in, so the same set of selected
-    categories always produces the same question list -- selection order
-    never affects the result. When the cap would be exceeded (e.g. 4
-    categories selected), later categories in that fixed order simply receive
-    fewer additional questions.
+def order_questions_by_rank(ranked_categories: Iterable[str]) -> list[Question]:
+    """All 20 questions, reordered: the voter's ranked-priority categories'
+    questions first (in rank order, `selection_priority` ascending within a
+    category), then every remaining category in CATEGORY_LABELS' fixed
+    canonical order. `ranked_categories` is the voter's 0-4 ranked category
+    ids, index 0 = rank 1 (only the first 4 are used; unknown or duplicate
+    category ids are ignored). Every question always appears exactly once --
+    ranking never excludes a question, only reorders it.
     """
-    selected = set(selected_categories)
-    active = [q for q in QUESTIONS if q.is_core]
-    active_ids = {q.id for q in active}
-    remaining = MAX_ACTIVE_QUESTIONS - len(active)
+    ranked = list(ranked_categories)[:4]
+    seen_categories: set[str] = set()
+    ordered: list[Question] = []
 
-    for category in CATEGORY_LABELS:
-        if category not in selected or remaining <= 0:
-            continue
-        candidates = sorted(
-            (q for q in QUESTIONS if q.category == category and q.id not in active_ids),
+    def questions_in(category: str) -> list[Question]:
+        return sorted(
+            (q for q in QUESTIONS if q.category == category),
             key=lambda q: q.selection_priority,
         )
-        take = candidates[: min(MAX_ADDITIONAL_PER_CATEGORY, remaining)]
-        active.extend(take)
-        active_ids.update(q.id for q in take)
-        remaining -= len(take)
 
-    return active
+    for category in ranked:
+        if category in seen_categories or category not in CATEGORY_LABELS:
+            continue
+        seen_categories.add(category)
+        ordered.extend(questions_in(category))
+
+    for category in CATEGORY_LABELS:
+        if category in seen_categories:
+            continue
+        seen_categories.add(category)
+        ordered.extend(questions_in(category))
+
+    return ordered
 
 
 def derive_effective_weights(
@@ -351,11 +336,11 @@ def compute_radar_scores(
     scores: dict[str, float] = {}
     for category in CATEGORY_LABELS:
         if category in selected:
-            scores[category] = RADAR_SELECTED_SCORE
+            scores[category] = 100.0
         elif category in answered_categories:
-            scores[category] = RADAR_ANSWERED_SCORE
+            scores[category] = 40.0
         else:
-            scores[category] = RADAR_UNREPRESENTED_SCORE
+            scores[category] = 0.0
     return scores
 
 

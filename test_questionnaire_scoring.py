@@ -2,15 +2,13 @@ import pytest
 
 from questionnaire_scoring import (
     CATEGORY_LABELS,
-    MAX_ACTIVE_QUESTIONS,
-    MAX_ADDITIONAL_PER_CATEGORY,
     QUESTIONS,
     QUESTIONS_BY_ID,
-    build_active_questions,
     compute_candidate_compatibility,
     compute_compass_scores,
     compute_radar_scores,
     derive_effective_weights,
+    order_questions_by_rank,
 )
 
 
@@ -36,68 +34,56 @@ def _housing_question_ids():
     return [q.id for q in QUESTIONS if q.category == "housing"]
 
 
-# --- Personalized questionnaire builder (build_active_questions) ------------
+# --- Question ordering (order_questions_by_rank) -----------------------------
 
 
-def test_exactly_five_questions_are_marked_core():
-    core = [q for q in QUESTIONS if q.is_core]
-    assert len(core) == 5
-    # The 5 core questions collectively cover taxes, housing, safety,
-    # education, and accountability -- the "general" areas every voter sees.
-    assert {q.category for q in core} == {"taxes", "housing", "safety", "education", "accountability"}
+def test_order_questions_by_rank_returns_all_20_questions_exactly_once():
+    ordered = order_questions_by_rank(["housing", "safety"])
+    assert len(ordered) == 20
+    assert {q.id for q in ordered} == set(QUESTIONS_BY_ID.keys())
+
+
+def test_order_questions_by_rank_puts_ranked_categories_first_in_rank_order():
+    ordered = order_questions_by_rank(["safety", "housing"])
+    ordered_categories = [q.category for q in ordered]
+    # All of "safety"'s questions (rank 1) come before all of "housing"'s (rank 2).
+    last_safety_index = max(i for i, c in enumerate(ordered_categories) if c == "safety")
+    first_housing_index = min(i for i, c in enumerate(ordered_categories) if c == "housing")
+    assert last_safety_index < first_housing_index
+
+
+def test_order_questions_by_rank_puts_unranked_categories_after_ranked_in_canonical_order():
+    ordered = order_questions_by_rank(["environment"])
+    ordered_categories = [q.category for q in ordered]
+    last_environment_index = max(i for i, c in enumerate(ordered_categories) if c == "environment")
+    # "housing" is unranked here and comes before "environment" in CATEGORY_LABELS'
+    # canonical order, but environment was explicitly ranked, so it must still lead.
+    first_housing_index = min(i for i, c in enumerate(ordered_categories) if c == "housing")
+    assert last_environment_index < first_housing_index
+    # Among the unranked tail, canonical CATEGORY_LABELS order is preserved:
+    # housing comes before taxes.
+    first_taxes_index = min(i for i, c in enumerate(ordered_categories) if c == "taxes")
+    assert first_housing_index < first_taxes_index
+
+
+def test_order_questions_by_rank_is_empty_ranked_list_safe():
+    ordered = order_questions_by_rank([])
+    assert len(ordered) == 20
+    assert [q.category for q in ordered][0] == "housing"  # falls straight to canonical order
+
+
+def test_order_questions_by_rank_ignores_unknown_and_duplicate_categories():
+    ordered = order_questions_by_rank(["housing", "housing", "not_a_real_category", "taxes"])
+    assert len(ordered) == 20
+    ordered_categories = [q.category for q in ordered]
+    last_housing_index = max(i for i, c in enumerate(ordered_categories) if c == "housing")
+    first_taxes_index = min(i for i, c in enumerate(ordered_categories) if c == "taxes")
+    assert last_housing_index < first_taxes_index
 
 
 def test_all_question_ids_are_unique():
     ids = [q.id for q in QUESTIONS]
     assert len(ids) == len(set(ids))
-
-
-def test_every_category_has_enough_selectable_non_core_questions():
-    for category in CATEGORY_LABELS:
-        selectable = [q for q in QUESTIONS if q.category == category and not q.is_core]
-        assert len(selectable) >= MAX_ADDITIONAL_PER_CATEGORY
-
-
-def test_build_active_questions_always_includes_all_five_core_questions():
-    active = build_active_questions(["housing"])
-    core_ids = {q.id for q in QUESTIONS if q.is_core}
-    active_ids = {q.id for q in active}
-    assert core_ids <= active_ids
-
-
-def test_build_active_questions_one_category_stays_within_cap():
-    active = build_active_questions(["housing"])
-    assert len(active) <= MAX_ACTIVE_QUESTIONS
-    # 5 core + up to 2 additional housing questions.
-    assert len(active) <= 7
-
-
-def test_build_active_questions_four_categories_stays_within_cap():
-    active = build_active_questions(["housing", "taxes", "safety", "education"])
-    assert len(active) <= MAX_ACTIVE_QUESTIONS
-
-
-def test_build_active_questions_never_repeats_a_question():
-    active = build_active_questions(["housing", "taxes", "safety", "education"])
-    ids = [q.id for q in active]
-    assert len(ids) == len(set(ids))
-
-
-def test_build_active_questions_is_deterministic_regardless_of_selection_order():
-    forward = [q.id for q in build_active_questions(["taxes", "housing", "safety", "education"])]
-    reverse = [q.id for q in build_active_questions(["education", "safety", "housing", "taxes"])]
-    assert forward == reverse
-
-
-def test_build_active_questions_adds_up_to_two_per_selected_category():
-    active = build_active_questions(["transportation"])
-    transportation_ids = {q.id for q in active if q.category == "transportation"}
-    assert len(transportation_ids) == 2
-
-
-def test_build_active_questions_never_exceeds_twelve_for_all_seven_categories():
-    active = build_active_questions(list(CATEGORY_LABELS))
-    assert len(active) <= MAX_ACTIVE_QUESTIONS
 
 
 # --- Effective weight derivation (derive_effective_weights) ------------------
