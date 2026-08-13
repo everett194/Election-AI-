@@ -7,7 +7,7 @@
 import { createContext, useContext, useCallback, useMemo, useState, type ReactNode } from 'react'
 import * as api from '../api'
 import type { ApiRace, ApiQuestion, CandidateProfile, ResultsResponse, Office } from '../api'
-import { buildActiveQuestions, MAX_SELECTED_CATEGORIES } from '../lib/activeQuestions'
+import { orderQuestionsByRank, MAX_RANKED_CATEGORIES } from '../lib/questionOrder'
 
 export type FetchStatus = 'idle' | 'loading' | 'loaded' | 'error'
 
@@ -51,7 +51,7 @@ interface AppDataContextType {
 
   selectedIssueCategories: string[]
   toggleIssueCategory: (categoryId: string) => void
-  activeQuestions: ApiQuestion[]
+  orderedQuestions: ApiQuestion[]
 
   quizAnswers: Record<string, number | null>
   setQuizAnswer: (questionId: string, value: number | null) => void
@@ -89,8 +89,8 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
   const [resultsStatus, setResultsStatus] = useState<FetchStatus>('idle')
   const [resultsError, setResultsError] = useState<string | null>(null)
 
-  const activeQuestions = useMemo(
-    () => buildActiveQuestions(questions, selectedIssueCategories),
+  const orderedQuestions = useMemo(
+    () => orderQuestionsByRank(questions, selectedIssueCategories),
     [questions, selectedIssueCategories],
   )
 
@@ -115,7 +115,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
         office: race.office,
         jurisdiction_name: race.jurisdiction_name,
         candidates: race.candidates.map((c) => ({ name: c.name, party: c.party, incumbent: c.incumbent })),
-        ...(selectedCategories && selectedCategories.length > 0 ? { selected_categories: selectedCategories } : {}),
+        ...(selectedCategories && selectedCategories.length > 0 ? { ranked_categories: selectedCategories } : {}),
       })
       setProfiles((prev) => {
         const next = { ...prev }
@@ -236,8 +236,11 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
 
   const toggleIssueCategory = useCallback((categoryId: string) => {
     setSelectedIssueCategories((prev) => {
+      // Array order IS rank order (index 0 = rank 1) -- removing an item
+      // naturally shifts every later category up a rank with no separate
+      // renumbering step needed.
       if (prev.includes(categoryId)) return prev.filter((c) => c !== categoryId)
-      if (prev.length >= MAX_SELECTED_CATEGORIES) return prev
+      if (prev.length >= MAX_RANKED_CATEGORIES) return prev
       return [...prev, categoryId]
     })
   }, [])
@@ -261,27 +264,25 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       await ensureAllRacesResearched()
       await ensurePriorityResearch()
 
-      // Only answers to questions still in the active (personalized)
-      // questionnaire are ever submitted -- if the voter changed their
-      // selected categories after answering a question that's since dropped
-      // out of the active set, that answer is silently excluded rather than
-      // scored.
-      const activeQuestionIds = new Set(activeQuestions.map((q) => q.id))
       const answerEntries = Object.entries(quizAnswers).filter(
-        (entry): entry is [string, number] =>
-          entry[1] !== null && entry[1] !== undefined && activeQuestionIds.has(entry[0]),
+        (entry): entry is [string, number] => entry[1] !== null && entry[1] !== undefined,
       )
 
       const candidatesForScoring = elections.races.flatMap((race) =>
         race.candidates.map((c) => {
           const profile = profiles[candidateKey(race.office, c.name)]
-          return { name: c.name, office: race.office, positions: profile?.positions ?? {} }
+          return {
+            name: c.name,
+            office: race.office,
+            positions: profile?.positions ?? {},
+            emphasis: profile?.emphasis ?? {},
+          }
         }),
       )
 
       const response = await api.getResults({
         answers: Object.fromEntries(answerEntries),
-        selected_categories: selectedIssueCategories,
+        ranked_categories: selectedIssueCategories,
         candidates: candidatesForScoring,
       })
       setResults(response)
@@ -296,7 +297,6 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
     elections.races,
     profiles,
     quizAnswers,
-    activeQuestions,
     selectedIssueCategories,
   ])
 
@@ -317,7 +317,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       clearComparison,
       selectedIssueCategories,
       toggleIssueCategory,
-      activeQuestions,
+      orderedQuestions,
       quizAnswers,
       setQuizAnswer,
       resetQuiz,
@@ -342,7 +342,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       clearComparison,
       selectedIssueCategories,
       toggleIssueCategory,
-      activeQuestions,
+      orderedQuestions,
       quizAnswers,
       setQuizAnswer,
       resetQuiz,
