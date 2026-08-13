@@ -297,50 +297,64 @@ def order_questions_by_rank(ranked_categories: Iterable[str]) -> list[Question]:
     return ordered
 
 
+RANK_WEIGHTS: dict[int, int] = {1: 5, 2: 4, 3: 3, 4: 2}
+BASELINE_WEIGHT = 1
+
+
 def derive_effective_weights(
-    selected_categories: Iterable[str], answered_question_ids: Iterable[str]
+    ranked_categories: Iterable[str], answered_question_ids: Iterable[str]
 ) -> dict[str, int]:
     """The single authoritative source of per-question compatibility weight,
-    derived from the voter's selected priority categories rather than a
-    per-question Low/Medium/High control. A question in a selected category
-    gets weight 5; any other answered question gets baseline weight 2 --
-    never 0, so nonselected categories still count toward a candidate's
+    derived from the voter's ranked priority categories (rank 1 = most
+    important) rather than a per-question Low/Medium/High control. Rank 1-4
+    map to weights 5/4/3/2; any other answered question gets baseline weight
+    1 -- never 0, so unranked categories still count toward a candidate's
     match. Unanswered question ids are simply omitted (skipped/unasked
-    questions must not affect compatibility).
+    questions must not affect compatibility). Only the first 4 entries of
+    `ranked_categories` are used.
     """
-    selected = set(selected_categories)
+    rank_by_category = {category: i + 1 for i, category in enumerate(list(ranked_categories)[:4])}
     weights: dict[str, int] = {}
     for question_id in answered_question_ids:
         question = QUESTIONS_BY_ID.get(question_id)
         if question is None:
             continue
-        weights[question_id] = 5 if question.category in selected else 2
+        rank = rank_by_category.get(question.category)
+        weights[question_id] = RANK_WEIGHTS.get(rank, BASELINE_WEIGHT)
     return weights
 
 
+RADAR_SCORE_BY_RANK: dict[int, float] = {1: 100.0, 2: 80.0, 3: 60.0, 4: 40.0}
+RADAR_BASELINE_ANSWERED_SCORE = 20.0
+RADAR_UNREPRESENTED_SCORE = 0.0
+
+
 def compute_radar_scores(
-    selected_categories: Iterable[str], answered_question_ids: Iterable[str]
+    ranked_categories: Iterable[str], answered_question_ids: Iterable[str]
 ) -> dict[str, float]:
     """category -> voter-priority score (0-100) for the radar chart.
 
     This represents how much the voter prioritized each category, NOT their
     directional/ideological lean on it (see compute_compass_scores for
-    direction): 100 for a selected priority category, 40 for a nonselected
-    category the voter still answered at least one question in (typically
-    via the 5 general/core questions), 0 for a category with neither.
+    direction). A ranked category (1st-4th) scores its graduated value
+    (100/80/60/40) regardless of whether its questions were answered --
+    ranking itself expresses the priority. An unranked category scores 20 if
+    the voter answered at least one of its questions, or 0 if every question
+    in it was skipped.
     """
-    selected = set(selected_categories)
+    rank_by_category = {category: i + 1 for i, category in enumerate(list(ranked_categories)[:4])}
     answered_categories = {
         QUESTIONS_BY_ID[qid].category for qid in answered_question_ids if qid in QUESTIONS_BY_ID
     }
     scores: dict[str, float] = {}
     for category in CATEGORY_LABELS:
-        if category in selected:
-            scores[category] = 100.0
+        rank = rank_by_category.get(category)
+        if rank is not None:
+            scores[category] = RADAR_SCORE_BY_RANK[rank]
         elif category in answered_categories:
-            scores[category] = 40.0
+            scores[category] = RADAR_BASELINE_ANSWERED_SCORE
         else:
-            scores[category] = 0.0
+            scores[category] = RADAR_UNREPRESENTED_SCORE
     return scores
 
 

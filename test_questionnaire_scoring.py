@@ -86,19 +86,45 @@ def test_all_question_ids_are_unique():
     assert len(ids) == len(set(ids))
 
 
-# --- Effective weight derivation (derive_effective_weights) ------------------
+# --- Rank-based effective weight derivation (derive_effective_weights) -------
 
 
-def test_selected_category_question_gets_weight_five():
+def test_rank_1_category_question_gets_weight_five():
     weights = derive_effective_weights(["housing"], ["housing_zoning_density"])
     assert weights["housing_zoning_density"] == 5
 
 
-def test_nonselected_core_question_gets_baseline_weight_two_not_zero():
-    # taxes_shortfall is a core question but "taxes" was not selected here.
+def test_rank_2_category_question_gets_weight_four():
+    weights = derive_effective_weights(["taxes", "housing"], ["housing_zoning_density"])
+    assert weights["housing_zoning_density"] == 4
+
+
+def test_rank_3_category_question_gets_weight_three():
+    weights = derive_effective_weights(["taxes", "safety", "housing"], ["housing_zoning_density"])
+    assert weights["housing_zoning_density"] == 3
+
+
+def test_rank_4_category_question_gets_weight_two():
+    weights = derive_effective_weights(
+        ["taxes", "safety", "education", "housing"], ["housing_zoning_density"]
+    )
+    assert weights["housing_zoning_density"] == 2
+
+
+def test_unranked_question_gets_baseline_weight_one_not_zero():
+    # taxes_shortfall is answered but "taxes" is not in the ranked list.
     weights = derive_effective_weights(["housing"], ["taxes_shortfall"])
-    assert weights["taxes_shortfall"] == 2
+    assert weights["taxes_shortfall"] == 1
     assert weights["taxes_shortfall"] != 0
+
+
+def test_derive_effective_weights_only_uses_first_four_ranked_categories():
+    # A 5th ranked category (shouldn't happen from the UI, which caps at 4,
+    # but the function itself must not read past index 3) is treated as unranked.
+    weights = derive_effective_weights(
+        ["taxes", "safety", "education", "accountability", "housing"], ["housing_zoning_density"]
+    )
+    assert weights["housing_zoning_density"] == 1
 
 
 def test_derive_effective_weights_ignores_unanswered_question_ids():
@@ -112,27 +138,31 @@ def test_derive_effective_weights_skips_unknown_question_id():
     assert weights == {}
 
 
-# --- Priority radar (compute_radar_scores) -----------------------------------
+# --- Graduated priority radar (compute_radar_scores) -------------------------
 
 
-def test_radar_score_is_100_for_selected_category():
-    scores = compute_radar_scores(["housing"], [])
+def test_radar_score_by_rank_is_graduated():
+    scores = compute_radar_scores(["housing", "taxes", "safety", "education"], [])
     assert scores["housing"] == pytest.approx(100.0)
+    assert scores["taxes"] == pytest.approx(80.0)
+    assert scores["safety"] == pytest.approx(60.0)
+    assert scores["education"] == pytest.approx(40.0)
 
 
-def test_radar_score_is_40_for_nonselected_but_answered_category():
+def test_radar_score_is_20_for_unranked_but_answered_category():
     scores = compute_radar_scores(["housing"], ["taxes_shortfall"])
-    assert scores["taxes"] == pytest.approx(40.0)
+    assert scores["taxes"] == pytest.approx(20.0)
 
 
-def test_radar_score_is_0_for_completely_unrepresented_category():
+def test_radar_score_is_0_for_unranked_and_unanswered_category():
     scores = compute_radar_scores(["housing"], ["taxes_shortfall"])
     assert scores["safety"] == pytest.approx(0.0)
 
 
-def test_radar_score_selected_category_wins_over_answered_baseline():
-    # A category that's both selected AND answered still scores 100, not 40.
-    scores = compute_radar_scores(["housing"], ["housing_zoning_density"])
+def test_radar_score_ranked_category_wins_even_if_unanswered():
+    # Ranking itself expresses the priority -- a ranked category scores its
+    # graduated value regardless of whether the voter answered its questions.
+    scores = compute_radar_scores(["housing"], [])
     assert scores["housing"] == pytest.approx(100.0)
 
 
@@ -249,9 +279,6 @@ def test_compatibility_by_category_weighted_average():
 
 
 def test_unasked_questions_do_not_affect_compatibility():
-    # Only the answered question is ever in voter_answers, so derive_effective_weights
-    # never produces a weight for an unasked question, and compute_candidate_compatibility
-    # never sees it -- adding more QUESTIONS to the bank can't change this result.
     answers = {"housing_zoning_density": 5}
     weights = derive_effective_weights(["housing"], answers.keys())
     result = compute_candidate_compatibility(answers, weights, {"housing_zoning_density": 5})
@@ -260,8 +287,6 @@ def test_unasked_questions_do_not_affect_compatibility():
 
 
 def test_skipped_question_does_not_affect_compatibility():
-    # A "Not Sure / Skip" answer is simply never added to voter_answers by the
-    # frontend, so it behaves identically to an unasked question here.
     answers = {"housing_zoning_density": 5}  # taxes_shortfall was skipped, never included
     weights = derive_effective_weights(["housing"], answers.keys())
     result = compute_candidate_compatibility(
@@ -273,20 +298,21 @@ def test_skipped_question_does_not_affect_compatibility():
 def test_unknown_candidate_position_remains_excluded_even_with_derived_weights():
     answers = {"housing_zoning_density": 5, "taxes_shortfall": 2}
     weights = derive_effective_weights(["housing"], answers.keys())
-    # Candidate has no documented position on taxes_shortfall at all.
-    result = compute_candidate_compatibility(answers, weights, {"housing_zoning_density": 5})
+    result = compute_candidate_compatibility(
+        answers, weights, {"housing_zoning_density": 5}
+    )
     assert result["question_count"] == 1
     assert "taxes" not in result["by_category"]
 
 
-def test_selected_category_weight_dominates_nonselected_in_overall_compatibility():
-    # housing selected (weight 5, mismatched), taxes nonselected (weight 2, perfect match) --
+def test_rank_1_weight_dominates_unranked_in_overall_compatibility():
+    # housing ranked 1st (weight 5, mismatched), taxes unranked (weight 1, perfect match) --
     # overall should be pulled toward the mismatch since it's weighted more heavily.
     answers = {"housing_zoning_density": 5, "taxes_shortfall": 2}
     weights = derive_effective_weights(["housing"], answers.keys())
     result = compute_candidate_compatibility(
         answers, weights, {"housing_zoning_density": 1, "taxes_shortfall": 2}
     )
-    # housing: compat=0, weight=5 -> 0; taxes: compat=1, weight=2 -> 2
-    # overall = 100 * 2 / 7
-    assert result["overall_pct"] == pytest.approx(200 / 7)
+    # housing: compat=0, weight=5 -> 0; taxes: compat=1, weight=1 -> 1
+    # overall = 100 * 1 / 6
+    assert result["overall_pct"] == pytest.approx(100 / 6)
