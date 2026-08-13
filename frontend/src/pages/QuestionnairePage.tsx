@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNav } from '../context/nav'
 import { useAppData } from '../context/appData'
 import type { ApiQuestion } from '../api'
-import { MAX_SELECTED_CATEGORIES, MIN_SELECTED_CATEGORIES, RECOMMENDED_SELECTED_CATEGORIES } from '../lib/activeQuestions'
+import { MAX_RANKED_CATEGORIES, MIN_RANKED_CATEGORIES, RECOMMENDED_RANKED_CATEGORIES } from '../lib/questionOrder'
 
 const POSITION_OPTIONS = [1, 2, 3, 4, 5]
 
@@ -31,12 +31,13 @@ interface CategoryOption {
   label: string
 }
 
-function CategoryCard({ option, selected, disabled, onToggle }: {
+function CategoryCard({ option, rank, disabled, onToggle }: {
   option: CategoryOption
-  selected: boolean
+  rank: number | null
   disabled: boolean
   onToggle: () => void
 }) {
+  const selected = rank !== null
   return (
     <button
       type="button"
@@ -47,28 +48,28 @@ function CategoryCard({ option, selected, disabled, onToggle }: {
         ${selected ? 'border-civic bg-civic-pale shadow-sm' : 'border-border bg-surface hover:border-civic/40 hover:bg-civic-pale/30'}
         ${disabled ? 'opacity-40 cursor-not-allowed' : ''}`}
     >
-      <span className={`mt-0.5 w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 transition-colors
-        ${selected ? 'bg-civic border-civic' : 'border-border-strong'}`}>
-        {selected && (
-          <svg viewBox="0 0 16 16" fill="none" stroke="white" strokeWidth="2.5" className="w-3 h-3">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M3 8l3.5 3.5L13 5" />
-          </svg>
-        )}
+      <span className={`mt-0.5 w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 transition-colors text-[11px] font-bold
+        ${selected ? 'bg-civic border-civic text-white' : 'border-border-strong text-transparent'}`}>
+        {selected ? rank : ''}
       </span>
       <span className="text-sm font-medium text-navy leading-snug">{option.label}</span>
     </button>
   )
 }
 
-function CategoryStage({ options, selected, onToggle, onContinue }: {
+function CategoryStage({ options, ranked, onToggle, onContinue }: {
   options: CategoryOption[]
-  selected: string[]
+  ranked: string[]
   onToggle: (id: string) => void
   onContinue: () => void
 }) {
   const { navigate } = useNav()
-  const count = selected.length
-  const canContinue = count >= MIN_SELECTED_CATEGORIES
+  const count = ranked.length
+  const canContinue = count >= MIN_RANKED_CATEGORIES
+  const rankOf = (id: string): number | null => {
+    const index = ranked.indexOf(id)
+    return index === -1 ? null : index + 1
+  }
 
   return (
     <div className="min-h-screen bg-soft page-enter">
@@ -78,9 +79,9 @@ function CategoryStage({ options, selected, onToggle, onContinue }: {
             <div className="flex items-center gap-2 text-xs text-muted">
               <button onClick={() => navigate('home')} className="hover:text-civic">Home</button>
               <span>/</span>
-              <span className="text-navy font-medium">Choose your priorities</span>
+              <span className="text-navy font-medium">Rank your priorities</span>
             </div>
-            <span className="text-xs text-muted font-mono">{count} of {MAX_SELECTED_CATEGORIES} selected</span>
+            <span className="text-xs text-muted font-mono">{count} of {MAX_RANKED_CATEGORIES} ranked</span>
           </div>
         </div>
       </div>
@@ -92,19 +93,19 @@ function CategoryStage({ options, selected, onToggle, onContinue }: {
               Which issues matter most to you?
             </p>
             <p className="mt-2 text-sm text-muted leading-relaxed">
-              Pick {MIN_SELECTED_CATEGORIES}-{MAX_SELECTED_CATEGORIES} issues — we recommend {RECOMMENDED_SELECTED_CATEGORIES}. Every issue still counts toward your results; the ones you pick just count more.
+              Tap issues in the order you care about them — first tap is your top priority. Rank {MIN_RANKED_CATEGORIES}-{MAX_RANKED_CATEGORIES}, we recommend {RECOMMENDED_RANKED_CATEGORIES}. Every issue still counts toward your results; ranked ones just count more.
             </p>
           </div>
 
           <div className="px-6 sm:px-8 pb-7 grid grid-cols-1 sm:grid-cols-2 gap-3">
             {options.map((option) => {
-              const isSelected = selected.includes(option.id)
-              const disabled = !isSelected && count >= MAX_SELECTED_CATEGORIES
+              const rank = rankOf(option.id)
+              const disabled = rank === null && count >= MAX_RANKED_CATEGORIES
               return (
                 <CategoryCard
                   key={option.id}
                   option={option}
-                  selected={isSelected}
+                  rank={rank}
                   disabled={disabled}
                   onToggle={() => onToggle(option.id)}
                 />
@@ -201,7 +202,7 @@ export default function QuestionnairePage() {
   const { navigate } = useNav()
   const {
     questions, questionsStatus, ensureQuestionsLoaded,
-    selectedIssueCategories, toggleIssueCategory, activeQuestions,
+    selectedIssueCategories, toggleIssueCategory, orderedQuestions,
     quizAnswers, setQuizAnswer, resetQuiz,
     computeResults, resultsStatus, resultsError,
   } = useAppData()
@@ -217,8 +218,8 @@ export default function QuestionnairePage() {
   // Keep the current step in range if changing categories mid-flow shrinks
   // the active question list.
   useEffect(() => {
-    setStep((prev) => (activeQuestions.length === 0 ? 0 : Math.min(prev, activeQuestions.length - 1)))
-  }, [activeQuestions.length])
+    setStep((prev) => (orderedQuestions.length === 0 ? 0 : Math.min(prev, orderedQuestions.length - 1)))
+  }, [orderedQuestions.length])
 
   const categoryOptions = useMemo<CategoryOption[]>(() => {
     const seen = new Set<string>()
@@ -246,29 +247,32 @@ export default function QuestionnairePage() {
     return (
       <CategoryStage
         options={categoryOptions}
-        selected={selectedIssueCategories}
+        ranked={selectedIssueCategories}
         onToggle={toggleIssueCategory}
         onContinue={() => { setStep(0); setStage('questions') }}
       />
     )
   }
 
-  const total = activeQuestions.length
-  const q: ApiQuestion | undefined = activeQuestions[step]
-  const answeredCount = activeQuestions.filter((question) => quizAnswers[question.id] !== undefined).length
+  const total = orderedQuestions.length
+  const q: ApiQuestion | undefined = orderedQuestions[step]
+  const answeredCount = orderedQuestions.filter((question) => quizAnswers[question.id] !== undefined).length
 
   if (!q) {
-    // Shouldn't happen (every voter has at least the 5 core questions), but
-    // fall back to the category picker rather than rendering a blank page.
+    // Shouldn't happen (all 20 questions are always active once loaded), but
+    // fall back to the priority picker rather than rendering a blank page.
     return (
       <CategoryStage
         options={categoryOptions}
-        selected={selectedIssueCategories}
+        ranked={selectedIssueCategories}
         onToggle={toggleIssueCategory}
         onContinue={() => { setStep(0); setStage('questions') }}
       />
     )
   }
+
+  const rankIndex = selectedIssueCategories.indexOf(q.category)
+  const questionRank = rankIndex === -1 ? null : rankIndex + 1
 
   const answerValue = quizAnswers[q.id]
   const isAnswered = answerValue !== undefined
@@ -328,9 +332,9 @@ export default function QuestionnairePage() {
           <div className="px-6 sm:px-8 pt-7 pb-5">
             <div className="flex items-center gap-2">
               <CategoryBadge id={q.category} label={q.category_label} />
-              {q.is_core && (
-                <span className="text-[10px] font-mono font-semibold px-2.5 py-1 rounded-full border border-border text-muted uppercase tracking-widest">
-                  General
+              {questionRank !== null && (
+                <span className="text-[10px] font-mono font-semibold px-2.5 py-1 rounded-full border border-civic/30 text-civic uppercase tracking-widest">
+                  Priority #{questionRank}
                 </span>
               )}
             </div>
@@ -415,7 +419,7 @@ export default function QuestionnairePage() {
             </button>
 
             <div className="hidden sm:flex items-center gap-1 overflow-hidden max-w-[160px] flex-wrap">
-              {activeQuestions.map((question, i) => {
+              {orderedQuestions.map((question, i) => {
                 const isDone = quizAnswers[question.id] !== undefined
                 const isCurr = i === step
                 return (
