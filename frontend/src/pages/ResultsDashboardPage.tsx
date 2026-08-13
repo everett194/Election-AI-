@@ -264,8 +264,8 @@ export default function ResultsDashboardPage() {
               </button>
               {showMethodology && (
                 <div className="px-5 pb-6 border-t border-border space-y-3 text-sm text-navy/70 leading-relaxed">
-                  <p className="pt-4">Match percentages compare your questionnaire responses to candidate positions on the same 20 questions, using only questions where both you and the candidate have an answer. Each question is weighted by the importance you selected (Low, Medium, or High).</p>
-                  <p>Questions you answered "Not Sure" or skipped are excluded. Candidates with zero overlapping answered questions show no percentage rather than a misleading number.</p>
+                  <p className="pt-4">Match percentages compare your questionnaire answers to candidate positions on the same questions, using only questions where both you and the candidate have an answer. Questions in the issue categories you selected as priorities count more toward your match; every other answered question still counts, just at a lower weight — no category is ever weighted at zero.</p>
+                  <p>Questions you answered "Not Sure," skipped, or never saw are excluded. Candidates with zero overlapping answered questions show no percentage rather than a misleading number.</p>
                   <p>Match estimates are <strong>not predictions of future policy</strong> and do not account for positions not yet publicly documented.</p>
                 </div>
               )}
@@ -300,7 +300,7 @@ export default function ResultsDashboardPage() {
 
             <div className="grid lg:grid-cols-2 gap-6">
               {chartCandidates.length > 0 && (
-                <ChartCard title="Issue-by-issue alignment" subtitle="How closely each candidate matches you, by category">
+                <ChartCard title="Your issue priorities" subtitle="The dashed line shows how much you prioritized each issue — not agreement. Colored lines show how closely each candidate matches you, by category.">
                   {(variant) => (
                     <div className={variant === 'modal' ? 'grid md:grid-cols-[1fr_240px] gap-5 items-start' : 'grid lg:grid-cols-[1fr_220px] gap-4 items-start'}>
                       <IssueRadarChart

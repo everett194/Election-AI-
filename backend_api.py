@@ -33,6 +33,7 @@ from questionnaire_scoring import (
     compute_candidate_compatibility,
     compute_compass_scores,
     compute_radar_scores,
+    derive_effective_weights,
 )
 
 app = FastAPI(title="ElectMatch API")
@@ -103,6 +104,9 @@ def _question_to_dict(question) -> dict:
         "text": question.text,
         "approach_1": question.approach_1,
         "approach_2": question.approach_2,
+        "is_core": question.is_core,
+        "selection_priority": question.selection_priority,
+        "research_terms": list(question.research_terms),
     }
 
 
@@ -188,6 +192,11 @@ class CandidateResearchRequest(BaseModel):
     office: str
     jurisdiction_name: str
     candidates: list[CandidateInput]
+    # Voter's priority categories, if chosen already -- optional so existing
+    # callers (e.g. the background research kicked off right after an
+    # election search, before the voter has answered anything) keep working
+    # unchanged. See election_lookup.research_candidates_for_race_with_fallback.
+    selected_categories: list[str] | None = None
 
 
 @app.post("/api/candidates/research")
@@ -203,7 +212,11 @@ def research_candidates(body: CandidateResearchRequest) -> dict:
 
     try:
         profiles = election_lookup.research_candidates_for_race_with_fallback(
-            body.zipcode, body.office, body.jurisdiction_name, candidates
+            body.zipcode,
+            body.office,
+            body.jurisdiction_name,
+            candidates,
+            selected_categories=body.selected_categories,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=_missing_key_message(exc)) from exc
@@ -224,20 +237,25 @@ class CandidateResultInput(BaseModel):
 
 class ResultsRequest(BaseModel):
     answers: dict[str, int]
-    importance: dict[str, int]
+    # The 1-4 category ids the voter chose as priorities in stage 1 of the
+    # questionnaire. Effective per-question importance is derived from this
+    # server-side (see derive_effective_weights) -- the frontend no longer
+    # sends a per-question importance number.
+    selected_categories: list[str] = []
     candidates: list[CandidateResultInput] = []
 
 
 @app.post("/api/results")
 def get_results(body: ResultsRequest) -> dict:
-    answer_storage.save_submission(body.answers, body.importance)
+    answer_storage.save_submission(body.answers, body.selected_categories)
 
-    radar = compute_radar_scores(body.importance)
+    weights = derive_effective_weights(body.selected_categories, body.answers.keys())
+    radar = compute_radar_scores(body.selected_categories, body.answers.keys())
     voter_econ, voter_social = compute_compass_scores(body.answers)
 
     candidate_results = []
     for candidate in body.candidates:
-        compatibility = compute_candidate_compatibility(body.answers, body.importance, candidate.positions)
+        compatibility = compute_candidate_compatibility(body.answers, weights, candidate.positions)
         has_any_position = bool(candidate.positions)
         econ = social = None
         if has_any_position:

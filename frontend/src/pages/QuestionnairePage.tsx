@@ -1,14 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNav } from '../context/nav'
-import { useAppData, type ImportanceLevel } from '../context/appData'
+import { useAppData } from '../context/appData'
+import type { ApiQuestion } from '../api'
+import { MAX_SELECTED_CATEGORIES, MIN_SELECTED_CATEGORIES, RECOMMENDED_SELECTED_CATEGORIES } from '../lib/activeQuestions'
 
 const POSITION_OPTIONS = [1, 2, 3, 4, 5]
-
-const IMPORTANCE_OPTS: { val: ImportanceLevel; label: string; desc: string }[] = [
-  { val: 'low', label: 'Low', desc: 'Not a top priority for me' },
-  { val: 'medium', label: 'Medium', desc: 'Somewhat important' },
-  { val: 'high', label: 'High', desc: 'Very important to me' },
-]
 
 const CATEGORY_COLORS: Record<string, string> = {
   housing: 'bg-orange-50 text-orange-700 border-orange-200',
@@ -28,8 +24,118 @@ function CategoryBadge({ id, label }: { id: string; label: string }) {
   )
 }
 
-function ProgressHeader({ step, total, answeredCount }: { step: number; total: number; answeredCount: number }) {
-  const pct = Math.round(((step + 1) / total) * 100)
+// ─── Stage 1: priority-category picker ──────────────────────────────────────
+
+interface CategoryOption {
+  id: string
+  label: string
+}
+
+function CategoryCard({ option, selected, disabled, onToggle }: {
+  option: CategoryOption
+  selected: boolean
+  disabled: boolean
+  onToggle: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-pressed={selected}
+      disabled={disabled}
+      className={`text-left px-4 py-3.5 rounded-xl border-2 transition-all duration-150 flex items-start gap-3
+        ${selected ? 'border-civic bg-civic-pale shadow-sm' : 'border-border bg-surface hover:border-civic/40 hover:bg-civic-pale/30'}
+        ${disabled ? 'opacity-40 cursor-not-allowed' : ''}`}
+    >
+      <span className={`mt-0.5 w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 transition-colors
+        ${selected ? 'bg-civic border-civic' : 'border-border-strong'}`}>
+        {selected && (
+          <svg viewBox="0 0 16 16" fill="none" stroke="white" strokeWidth="2.5" className="w-3 h-3">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 8l3.5 3.5L13 5" />
+          </svg>
+        )}
+      </span>
+      <span className="text-sm font-medium text-navy leading-snug">{option.label}</span>
+    </button>
+  )
+}
+
+function CategoryStage({ options, selected, onToggle, onContinue }: {
+  options: CategoryOption[]
+  selected: string[]
+  onToggle: (id: string) => void
+  onContinue: () => void
+}) {
+  const { navigate } = useNav()
+  const count = selected.length
+  const canContinue = count >= MIN_SELECTED_CATEGORIES
+
+  return (
+    <div className="min-h-screen bg-soft page-enter">
+      <div className="bg-surface border-b border-border sticky top-[60px] z-40">
+        <div className="max-w-2xl mx-auto px-4 sm:px-6 py-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-xs text-muted">
+              <button onClick={() => navigate('home')} className="hover:text-civic">Home</button>
+              <span>/</span>
+              <span className="text-navy font-medium">Choose your priorities</span>
+            </div>
+            <span className="text-xs text-muted font-mono">{count} of {MAX_SELECTED_CATEGORIES} selected</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="max-w-2xl mx-auto px-4 sm:px-6 py-8">
+        <div className="bg-surface rounded-2xl border border-border shadow-sm overflow-hidden">
+          <div className="px-6 sm:px-8 pt-7 pb-4">
+            <p className="text-xl sm:text-2xl font-semibold text-navy leading-snug" style={{ fontFamily: 'Fraunces, Georgia, serif' }}>
+              Which issues matter most to you?
+            </p>
+            <p className="mt-2 text-sm text-muted leading-relaxed">
+              Pick {MIN_SELECTED_CATEGORIES}-{MAX_SELECTED_CATEGORIES} issues — we recommend {RECOMMENDED_SELECTED_CATEGORIES}. Every issue still counts toward your results; the ones you pick just count more.
+            </p>
+          </div>
+
+          <div className="px-6 sm:px-8 pb-7 grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {options.map((option) => {
+              const isSelected = selected.includes(option.id)
+              const disabled = !isSelected && count >= MAX_SELECTED_CATEGORIES
+              return (
+                <CategoryCard
+                  key={option.id}
+                  option={option}
+                  selected={isSelected}
+                  disabled={disabled}
+                  onToggle={() => onToggle(option.id)}
+                />
+              )
+            })}
+          </div>
+
+          <div className="px-6 sm:px-8 py-5 border-t border-border">
+            <button
+              onClick={onContinue}
+              disabled={!canContinue}
+              className="w-full py-3 rounded-xl bg-civic text-white font-semibold hover:bg-civic-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Continue →
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Stages 2 & 3: general + personalized policy questions ─────────────────
+
+function ProgressHeader({ step, total, answeredCount, onEditPriorities }: {
+  step: number
+  total: number
+  answeredCount: number
+  onEditPriorities: () => void
+}) {
+  const pct = total > 0 ? Math.round(((step + 1) / total) * 100) : 0
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between text-sm">
@@ -39,6 +145,9 @@ function ProgressHeader({ step, total, answeredCount }: { step: number; total: n
       <div className="relative h-2 bg-soft-mid rounded-full overflow-hidden">
         <div className="h-full bg-civic rounded-full transition-all duration-500 ease-out" style={{ width: `${pct}%` }} />
       </div>
+      <button onClick={onEditPriorities} className="text-xs text-civic hover:text-civic-light font-medium">
+        Edit your priorities
+      </button>
     </div>
   )
 }
@@ -92,16 +201,35 @@ export default function QuestionnairePage() {
   const { navigate } = useNav()
   const {
     questions, questionsStatus, ensureQuestionsLoaded,
-    quizAnswers, quizImportance, setQuizAnswer, setQuizImportance, resetQuiz,
+    selectedIssueCategories, toggleIssueCategory, activeQuestions,
+    quizAnswers, setQuizAnswer, resetQuiz,
     computeResults, resultsStatus, resultsError,
   } = useAppData()
 
+  const [stage, setStage] = useState<'categories' | 'questions'>('categories')
   const [step, setStep] = useState(0)
   const [submitted, setSubmitted] = useState(false)
 
   useEffect(() => {
     void ensureQuestionsLoaded()
   }, [ensureQuestionsLoaded])
+
+  // Keep the current step in range if changing categories mid-flow shrinks
+  // the active question list.
+  useEffect(() => {
+    setStep((prev) => (activeQuestions.length === 0 ? 0 : Math.min(prev, activeQuestions.length - 1)))
+  }, [activeQuestions.length])
+
+  const categoryOptions = useMemo<CategoryOption[]>(() => {
+    const seen = new Set<string>()
+    const options: CategoryOption[] = []
+    for (const q of questions) {
+      if (seen.has(q.category)) continue
+      seen.add(q.category)
+      options.push({ id: q.category, label: q.category_label })
+    }
+    return options
+  }, [questions])
 
   if (questionsStatus === 'loading' || questionsStatus === 'idle') {
     return <div className="min-h-screen bg-soft flex items-center justify-center text-muted text-sm">Loading questionnaire…</div>
@@ -114,18 +242,45 @@ export default function QuestionnairePage() {
     )
   }
 
-  const total = questions.length
-  const q = questions[step]
+  if (stage === 'categories') {
+    return (
+      <CategoryStage
+        options={categoryOptions}
+        selected={selectedIssueCategories}
+        onToggle={toggleIssueCategory}
+        onContinue={() => { setStep(0); setStage('questions') }}
+      />
+    )
+  }
+
+  const total = activeQuestions.length
+  const q: ApiQuestion | undefined = activeQuestions[step]
+  const answeredCount = activeQuestions.filter((question) => quizAnswers[question.id] !== undefined).length
+
+  if (!q) {
+    // Shouldn't happen (every voter has at least the 5 core questions), but
+    // fall back to the category picker rather than rendering a blank page.
+    return (
+      <CategoryStage
+        options={categoryOptions}
+        selected={selectedIssueCategories}
+        onToggle={toggleIssueCategory}
+        onContinue={() => { setStep(0); setStage('questions') }}
+      />
+    )
+  }
+
   const answerValue = quizAnswers[q.id]
-  const importanceVal = quizImportance[q.id] ?? 'medium'
-  const answeredCount = Object.values(quizAnswers).filter((v) => v !== undefined).length
   const isAnswered = answerValue !== undefined
 
   const handleNext = () => {
     if (step < total - 1) setStep(step + 1)
     else setSubmitted(true)
   }
-  const handlePrev = () => { if (step > 0) setStep(step - 1) }
+  const handlePrev = () => {
+    if (step > 0) setStep(step - 1)
+    else setStage('categories')
+  }
   const jumpTo = (i: number) => setStep(i)
 
   const handleViewResults = () => {
@@ -139,7 +294,7 @@ export default function QuestionnairePage() {
         total={total}
         computing={resultsStatus === 'loading'}
         onViewResults={handleViewResults}
-        onRetake={() => { setStep(0); setSubmitted(false); resetQuiz() }}
+        onRetake={() => { setStep(0); setSubmitted(false); setStage('categories'); resetQuiz() }}
       />
     )
   }
@@ -155,7 +310,12 @@ export default function QuestionnairePage() {
               <span className="text-navy font-medium">Questionnaire</span>
             </div>
           </div>
-          <ProgressHeader step={step} total={total} answeredCount={answeredCount} />
+          <ProgressHeader
+            step={step}
+            total={total}
+            answeredCount={answeredCount}
+            onEditPriorities={() => setStage('categories')}
+          />
         </div>
       </div>
 
@@ -166,7 +326,14 @@ export default function QuestionnairePage() {
 
         <div className="bg-surface rounded-2xl border border-border shadow-sm overflow-hidden">
           <div className="px-6 sm:px-8 pt-7 pb-5">
-            <CategoryBadge id={q.category} label={q.category_label} />
+            <div className="flex items-center gap-2">
+              <CategoryBadge id={q.category} label={q.category_label} />
+              {q.is_core && (
+                <span className="text-[10px] font-mono font-semibold px-2.5 py-1 rounded-full border border-border text-muted uppercase tracking-widest">
+                  General
+                </span>
+              )}
+            </div>
 
             <p
               className="mt-5 text-xl sm:text-2xl font-semibold text-navy leading-snug"
@@ -233,33 +400,6 @@ export default function QuestionnairePage() {
             </button>
           </div>
 
-          <div className="px-6 sm:px-8 py-5 border-t border-border bg-soft/40">
-            <p className="text-xs font-medium text-muted-light uppercase tracking-widest mb-3">
-              How important is this issue to you?
-            </p>
-            <div className="flex gap-2.5">
-              {IMPORTANCE_OPTS.map(({ val, label, desc }) => {
-                const selected = importanceVal === val
-                const activeStyles: Record<ImportanceLevel, string> = {
-                  high: selected ? 'bg-gold-light border-gold text-gold-dark' : '',
-                  medium: selected ? 'bg-civic-pale border-civic text-civic' : '',
-                  low: selected ? 'bg-soft-mid border-border-strong text-navy/60' : '',
-                }
-                return (
-                  <button
-                    key={val}
-                    onClick={() => setQuizImportance(q.id, val)}
-                    title={desc}
-                    className={`flex-1 py-3 rounded-xl border text-xs font-semibold capitalize transition-all
-                      ${activeStyles[val] || 'bg-surface border-border text-muted hover:border-border-strong hover:bg-soft'}`}
-                  >
-                    {label}
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-
           {step === total - 1 && !isAnswered && (
             <div className="mx-6 mb-4 p-3 rounded-xl bg-amber-50 border border-amber-200 flex items-center gap-2 text-xs text-amber-700">
               You haven't answered this question. You can still submit — unanswered questions are excluded from match calculations.
@@ -269,14 +409,13 @@ export default function QuestionnairePage() {
           <div className="px-6 sm:px-8 py-5 border-t border-border flex items-center justify-between gap-4">
             <button
               onClick={handlePrev}
-              disabled={step === 0}
-              className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl border border-border text-sm font-medium text-muted hover:text-navy hover:border-border-strong transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+              className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl border border-border text-sm font-medium text-muted hover:text-navy hover:border-border-strong transition-all"
             >
               ← Previous
             </button>
 
             <div className="hidden sm:flex items-center gap-1 overflow-hidden max-w-[160px] flex-wrap">
-              {questions.map((question, i) => {
+              {activeQuestions.map((question, i) => {
                 const isDone = quizAnswers[question.id] !== undefined
                 const isCurr = i === step
                 return (

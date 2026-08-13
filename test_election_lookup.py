@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+import election_lookup
 from election_lookup import (
     Candidate,
     CandidateIssuePosition,
@@ -1010,3 +1011,191 @@ def test_fallback_skips_speculation_for_a_fully_sourced_candidate():
 
     assert len(profiles["Jane Doe"].positions) == len(QUESTIONS)
     assert fake_client.messages.create.call_count == 1
+
+
+# --- Priority-category Tavily research pass ---------------------------------
+
+
+def test_priority_search_queries_returns_five_variants_using_research_terms():
+    queries = election_lookup._priority_search_queries("Jane Doe", "mayor", "Springfield", "housing")
+    assert len(queries) == 5
+    assert all("Jane Doe" in q and "Springfield" in q for q in queries)
+    assert any("zoning reform" in q for q in queries)
+
+
+def test_dedupe_queries_preserves_order_and_removes_duplicates():
+    deduped = election_lookup._dedupe_queries(["a", "b", "a", "c", "b"])
+    assert deduped == ["a", "b", "c"]
+
+
+PRIORITY_BROAD_JSON = """
+{"candidates": [
+  {"name": "Jane Doe", "positions": [
+    {"question_id": "housing_zoning_density", "position": 4, "confidence": "explicit",
+     "source_url": "https://example.com/jane-housing"}
+  ]}
+]}
+"""
+
+PRIORITY_GAP_JSON = """
+{"candidates": [
+  {"name": "Jane Doe", "positions": [
+    {"question_id": "safety_police_funding", "position": 2, "confidence": "explicit",
+     "source_url": "https://example.com/jane-safety"}
+  ]}
+]}
+"""
+
+
+def _fake_search_many_echo(queries, max_results_per_query=6, api_key=None, search_depth="basic"):
+    return {q: [SearchResult(title="R", url=f"https://example.com/{q}", content="text")] for q in queries}
+
+
+def test_research_candidates_via_tavily_without_selected_categories_runs_broad_pass_only():
+    fake_client = MagicMock()
+    fake_client.messages.create.return_value = _mock_response(PRIORITY_BROAD_JSON)
+    candidates = [Candidate(name="Jane Doe", party=None, incumbent=None, positions=[])]
+
+    with patch(
+        "election_lookup.tavily_search.search_many", side_effect=_fake_search_many_echo
+    ) as mock_search_many:
+        profiles = research_candidates_via_tavily("62704", "mayor", "Springfield", candidates, client=fake_client)
+
+    # No selected_categories -- exactly the same broad-only behavior as before.
+    assert mock_search_many.call_count == 1
+    assert fake_client.messages.create.call_count == 1
+    assert profiles["Jane Doe"].positions == {"housing_zoning_density": 4}
+
+
+def test_research_candidates_via_tavily_adds_priority_pass_for_missing_category():
+    fake_client = MagicMock()
+    fake_client.messages.create.side_effect = [
+        _mock_response(PRIORITY_BROAD_JSON),
+        _mock_response(PRIORITY_GAP_JSON),
+    ]
+    candidates = [Candidate(name="Jane Doe", party=None, incumbent=None, positions=[])]
+
+    search_calls: list[list[str]] = []
+
+    def fake_search_many(queries, max_results_per_query=6, api_key=None, search_depth="basic"):
+        search_calls.append(list(queries))
+        return _fake_search_many_echo(queries)
+
+    with patch(
+        "election_lookup.tavily_search.search_many", side_effect=fake_search_many
+    ) as mock_search_many:
+        profiles = research_candidates_via_tavily(
+            "62704",
+            "mayor",
+            "Springfield",
+            candidates,
+            client=fake_client,
+            selected_categories=["housing", "safety"],
+        )
+
+    # Two Tavily fan-outs: broad (7 queries covering every category), then a
+    # priority pass covering ONLY "safety" -- "housing" was already sourced
+    # by the broad pass, so it must not be re-searched.
+    assert mock_search_many.call_count == 2
+    assert len(search_calls[0]) == 7
+    assert len(search_calls[1]) == 5
+    assert not any("housing" in q.lower() for q in search_calls[1])
+
+    assert fake_client.messages.create.call_count == 2
+    assert profiles["Jane Doe"].positions == {
+        "housing_zoning_density": 4,
+        "safety_police_funding": 2,
+    }
+    assert profiles["Jane Doe"].covered_categories() == {"housing", "safety"}
+
+
+def test_research_candidates_via_tavily_skips_priority_pass_when_fully_covered():
+    fake_client = MagicMock()
+    housing_positions_json = ",".join(
+        f'{{"question_id": "{q.id}", "position": 3, "confidence": "explicit", '
+        f'"source_url": "https://example.com/{q.id}"}}'
+        for q in QUESTIONS
+        if q.category == "housing"
+    )
+    broad_text = f'{{"candidates": [{{"name": "Jane Doe", "positions": [{housing_positions_json}]}}]}}'
+    fake_client.messages.create.return_value = _mock_response(broad_text)
+    candidates = [Candidate(name="Jane Doe", party=None, incumbent=None, positions=[])]
+
+    with patch(
+        "election_lookup.tavily_search.search_many", side_effect=_fake_search_many_echo
+    ) as mock_search_many:
+        profiles = research_candidates_via_tavily(
+            "62704",
+            "mayor",
+            "Springfield",
+            candidates,
+            client=fake_client,
+            selected_categories=["housing"],
+        )
+
+    # "housing" is already fully covered by the broad pass -- no second
+    # Tavily fan-out or second Claude call is needed.
+    assert mock_search_many.call_count == 1
+    assert fake_client.messages.create.call_count == 1
+    assert profiles["Jane Doe"].covered_categories() == {"housing"}
+
+
+def test_research_candidates_via_tavily_caps_and_dedupes_priority_queries():
+    fake_client = MagicMock()
+    fake_client.messages.create.side_effect = [
+        _mock_response('{"candidates": [{"name": "Jane Doe", "positions": []}]}'),
+        _mock_response('{"candidates": [{"name": "Jane Doe", "positions": []}]}'),
+    ]
+    candidates = [Candidate(name="Jane Doe", party=None, incumbent=None, positions=[])]
+
+    search_calls: list[list[str]] = []
+
+    def fake_search_many(queries, max_results_per_query=6, api_key=None, search_depth="basic"):
+        search_calls.append(list(queries))
+        return {q: [] for q in queries}
+
+    with patch("election_lookup.tavily_search.search_many", side_effect=fake_search_many):
+        research_candidates_via_tavily(
+            "62704",
+            "mayor",
+            "Springfield",
+            candidates,
+            client=fake_client,
+            selected_categories=["housing", "taxes", "safety", "education"],
+        )
+
+    # 4 missing categories x 5 variants = 20 possible queries, capped per candidate.
+    priority_queries = search_calls[1]
+    assert len(priority_queries) <= election_lookup._MAX_PRIORITY_QUERIES_PER_CANDIDATE
+    assert len(priority_queries) == len(set(priority_queries))
+
+
+def test_research_candidates_for_race_with_fallback_forwards_selected_categories():
+    fake_client = MagicMock()
+
+    def fake_create(*args, **kwargs):
+        content = kwargs["messages"][0]["content"]
+        if "analyzing pre-gathered web search" in content:
+            return _mock_response('{"candidates": [{"name": "Jane Doe", "positions": []}]}')
+        if "Do not use any tools" in content:
+            return _mock_response('{"candidates": [{"name": "Jane Doe", "positions": []}]}')
+        raise AssertionError(f"unexpected prompt: {content[:80]!r}")
+
+    fake_client.messages.create.side_effect = fake_create
+    candidates = [Candidate(name="Jane Doe", party=None, incumbent=None, positions=[])]
+
+    with patch(
+        "election_lookup.tavily_search.search_many", side_effect=_empty_evidence_search_many
+    ) as mock_search_many:
+        research_candidates_for_race_with_fallback(
+            "62704",
+            "mayor",
+            "Springfield",
+            candidates,
+            client=fake_client,
+            selected_categories=["housing"],
+        )
+
+    # Broad pass sourced nothing, so "housing" is still missing -- a priority
+    # pass fan-out should have gone out too (broad + priority = 2 calls).
+    assert mock_search_many.call_count == 2

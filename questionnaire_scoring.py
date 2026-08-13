@@ -10,7 +10,8 @@ the exact formulas in questionnaire.md / questionsfinal.md:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Iterable
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,10 @@ class Question:
     text: str
     approach_1: str
     approach_2: str
+    # Metadata for the personalized-questionnaire flow (see build_active_questions):
+    is_core: bool = False  # one of the 5 baseline questions every voter answers
+    selection_priority: int = 0  # lower = picked first as an additional question in its category
+    research_terms: tuple[str, ...] = field(default_factory=tuple)  # extra Tavily query terms
 
 
 CATEGORY_LABELS: dict[str, str] = {
@@ -43,6 +48,9 @@ QUESTIONS: list[Question] = [
         text="Should more apartments and duplexes be allowed?",
         approach_1="No—protect existing neighborhoods.",
         approach_2="Yes—allow more housing.",
+        is_core=True,
+        selection_priority=1,
+        research_terms=("zoning reform", "upzoning", "duplexes", "multifamily housing"),
     ),
     Question(
         id="housing_affordable_mandate",
@@ -52,6 +60,8 @@ QUESTIONS: list[Question] = [
         text="Should developers be required to build affordable housing?",
         approach_1="Yes—require affordable units.",
         approach_2="No—use incentives instead.",
+        selection_priority=1,
+        research_terms=("affordable housing mandate", "inclusionary zoning"),
     ),
     Question(
         id="housing_preservation_redevelopment",
@@ -61,6 +71,8 @@ QUESTIONS: list[Question] = [
         text="Should older buildings be easier to redevelop?",
         approach_1="No—protect historic buildings.",
         approach_2="Yes—make redevelopment easier.",
+        selection_priority=2,
+        research_terms=("historic preservation", "redevelopment"),
     ),
     Question(
         id="taxes_shortfall",
@@ -70,6 +82,9 @@ QUESTIONS: list[Question] = [
         text="Should taxes rise to protect public services?",
         approach_1="Yes—maintain public services.",
         approach_2="No—keep taxes lower.",
+        is_core=True,
+        selection_priority=1,
+        research_terms=("property tax levy", "tax increase"),
     ),
     Question(
         id="taxes_business_incentives",
@@ -79,6 +94,8 @@ QUESTIONS: list[Question] = [
         text="Should businesses receive local tax breaks?",
         approach_1="No—spend money elsewhere.",
         approach_2="Yes—attract businesses and jobs.",
+        selection_priority=1,
+        research_terms=("business tax incentives", "tax abatement"),
     ),
     Question(
         id="taxes_capital_debt",
@@ -88,6 +105,8 @@ QUESTIONS: list[Question] = [
         text="Should local government borrow for major projects?",
         approach_1="No—save and pay gradually.",
         approach_2="Yes—complete projects sooner.",
+        selection_priority=2,
+        research_terms=("municipal bond", "capital borrowing"),
     ),
     Question(
         id="safety_lowlevel_response",
@@ -97,6 +116,8 @@ QUESTIONS: list[Question] = [
         text="How should minor offenses be handled?",
         approach_1="More arrests and prosecution.",
         approach_2="More treatment and alternatives.",
+        selection_priority=1,
+        research_terms=("diversion program", "alternatives to arrest"),
     ),
     Question(
         id="safety_police_funding",
@@ -106,6 +127,9 @@ QUESTIONS: list[Question] = [
         text="Where should public-safety funding go?",
         approach_1="More police funding.",
         approach_2="More community and crisis programs.",
+        is_core=True,
+        selection_priority=1,
+        research_terms=("police budget", "public safety funding"),
     ),
     Question(
         id="safety_bail_pretrial",
@@ -115,6 +139,8 @@ QUESTIONS: list[Question] = [
         text="Should people accused of nonviolent crimes have to pay bail?",
         approach_1="Yes—use cash bail or detention.",
         approach_2="No—use non-cash release options.",
+        selection_priority=2,
+        research_terms=("cash bail", "pretrial release"),
     ),
     Question(
         id="education_funding_levy",
@@ -124,6 +150,9 @@ QUESTIONS: list[Question] = [
         text="Should school funding rise if taxes must rise?",
         approach_1="Yes—fund schools more.",
         approach_2="No—keep school taxes lower.",
+        is_core=True,
+        selection_priority=1,
+        research_terms=("school funding levy", "education budget"),
     ),
     Question(
         id="education_choice_vs_traditional",
@@ -133,6 +162,8 @@ QUESTIONS: list[Question] = [
         text="Should families have more school choices?",
         approach_1="No—focus on neighborhood public schools.",
         approach_2="Yes—expand school-choice options.",
+        selection_priority=1,
+        research_terms=("school choice", "charter schools"),
     ),
     Question(
         id="education_youth_services",
@@ -142,6 +173,8 @@ QUESTIONS: list[Question] = [
         text="Should local government spend more on youth programs?",
         approach_1="Yes—expand youth services.",
         approach_2="No—keep spending lower.",
+        selection_priority=2,
+        research_terms=("youth programs funding",),
     ),
     Question(
         id="transportation_mode_priority",
@@ -151,6 +184,8 @@ QUESTIONS: list[Question] = [
         text="What should transportation funding prioritize?",
         approach_1="Roads, parking, and cars.",
         approach_2="Transit, bikes, and walking.",
+        selection_priority=1,
+        research_terms=("transit funding", "bike lanes", "road funding"),
     ),
     Question(
         id="transportation_funding_mechanism",
@@ -160,6 +195,8 @@ QUESTIONS: list[Question] = [
         text="Who should pay for roads and infrastructure?",
         approach_1="All taxpayers.",
         approach_2="Users and developers.",
+        selection_priority=2,
+        research_terms=("infrastructure funding", "impact fees"),
     ),
     Question(
         id="environment_regulation_cost",
@@ -169,6 +206,8 @@ QUESTIONS: list[Question] = [
         text="Should development face stricter environmental rules?",
         approach_1="Yes—stronger environmental protections.",
         approach_2="No—fewer development restrictions.",
+        selection_priority=1,
+        research_terms=("environmental regulation", "development restrictions"),
     ),
     Question(
         id="environment_parks_vs_development",
@@ -178,6 +217,8 @@ QUESTIONS: list[Question] = [
         text="Should open land be preserved or developed?",
         approach_1="Preserve parks and open space.",
         approach_2="Allow more private development.",
+        selection_priority=2,
+        research_terms=("parks preservation", "open space"),
     ),
     Question(
         id="environment_climate_resilience",
@@ -187,6 +228,8 @@ QUESTIONS: list[Question] = [
         text="Should local government spend more to prepare for extreme weather?",
         approach_1="Yes—invest in protection now.",
         approach_2="No—prioritize other needs.",
+        selection_priority=3,
+        research_terms=("climate resilience", "extreme weather preparedness"),
     ),
     Question(
         id="accountability_neighborhood_control",
@@ -196,6 +239,8 @@ QUESTIONS: list[Question] = [
         text="Who should control neighborhood decisions?",
         approach_1="City or county leaders.",
         approach_2="Neighborhoods and community boards.",
+        selection_priority=1,
+        research_terms=("neighborhood councils", "community boards"),
     ),
     Question(
         id="accountability_public_input",
@@ -205,6 +250,9 @@ QUESTIONS: list[Question] = [
         text="Should major decisions require more public input?",
         approach_1="No—make decisions faster.",
         approach_2="Yes—allow more public input.",
+        is_core=True,
+        selection_priority=1,
+        research_terms=("public input", "community engagement"),
     ),
     Question(
         id="accountability_elected_vs_appointed",
@@ -214,29 +262,100 @@ QUESTIONS: list[Question] = [
         text="Should more local boards be elected?",
         approach_1="No—keep boards appointed.",
         approach_2="Yes—let voters choose.",
+        selection_priority=2,
+        research_terms=("elected boards", "appointed commissions"),
     ),
 ]
 
 QUESTIONS_BY_ID: dict[str, Question] = {q.id: q for q in QUESTIONS}
 
+MAX_ACTIVE_QUESTIONS = 12
+MAX_ADDITIONAL_PER_CATEGORY = 2
 
-def compute_radar_scores(importance_by_id: dict[str, int]) -> dict[str, float]:
-    """category -> 0..100 score representing how much the voter prioritizes that category.
+RADAR_SELECTED_SCORE = 100.0
+RADAR_ANSWERED_SCORE = 40.0
+RADAR_UNREPRESENTED_SCORE = 0.0
 
-    Unanswered categories score 0 rather than being omitted, so every radar axis is defined.
+
+def build_active_questions(selected_categories: Iterable[str]) -> list[Question]:
+    """Builds the personalized questionnaire for a voter who picked
+    `selected_categories` (1-4 of the 7 category ids) as their priorities.
+
+    Always includes the 5 core questions (see Question.is_core), then adds up
+    to MAX_ADDITIONAL_PER_CATEGORY questions per selected category (ordered by
+    Question.selection_priority), never exceeding MAX_ACTIVE_QUESTIONS total.
+
+    Category order follows CATEGORY_LABELS' fixed iteration order rather than
+    the order the voter selected them in, so the same set of selected
+    categories always produces the same question list -- selection order
+    never affects the result. When the cap would be exceeded (e.g. 4
+    categories selected), later categories in that fixed order simply receive
+    fewer additional questions.
     """
-    values_by_category: dict[str, list[int]] = {category: [] for category in CATEGORY_LABELS}
-    for question in QUESTIONS:
-        if question.id in importance_by_id:
-            values_by_category[question.category].append(importance_by_id[question.id])
+    selected = set(selected_categories)
+    active = [q for q in QUESTIONS if q.is_core]
+    active_ids = {q.id for q in active}
+    remaining = MAX_ACTIVE_QUESTIONS - len(active)
 
-    scores: dict[str, float] = {}
-    for category, values in values_by_category.items():
-        if not values:
-            scores[category] = 0.0
+    for category in CATEGORY_LABELS:
+        if category not in selected or remaining <= 0:
             continue
-        avg_importance = sum(values) / len(values)
-        scores[category] = 100 * (avg_importance - 1) / 4
+        candidates = sorted(
+            (q for q in QUESTIONS if q.category == category and q.id not in active_ids),
+            key=lambda q: q.selection_priority,
+        )
+        take = candidates[: min(MAX_ADDITIONAL_PER_CATEGORY, remaining)]
+        active.extend(take)
+        active_ids.update(q.id for q in take)
+        remaining -= len(take)
+
+    return active
+
+
+def derive_effective_weights(
+    selected_categories: Iterable[str], answered_question_ids: Iterable[str]
+) -> dict[str, int]:
+    """The single authoritative source of per-question compatibility weight,
+    derived from the voter's selected priority categories rather than a
+    per-question Low/Medium/High control. A question in a selected category
+    gets weight 5; any other answered question gets baseline weight 2 --
+    never 0, so nonselected categories still count toward a candidate's
+    match. Unanswered question ids are simply omitted (skipped/unasked
+    questions must not affect compatibility).
+    """
+    selected = set(selected_categories)
+    weights: dict[str, int] = {}
+    for question_id in answered_question_ids:
+        question = QUESTIONS_BY_ID.get(question_id)
+        if question is None:
+            continue
+        weights[question_id] = 5 if question.category in selected else 2
+    return weights
+
+
+def compute_radar_scores(
+    selected_categories: Iterable[str], answered_question_ids: Iterable[str]
+) -> dict[str, float]:
+    """category -> voter-priority score (0-100) for the radar chart.
+
+    This represents how much the voter prioritized each category, NOT their
+    directional/ideological lean on it (see compute_compass_scores for
+    direction): 100 for a selected priority category, 40 for a nonselected
+    category the voter still answered at least one question in (typically
+    via the 5 general/core questions), 0 for a category with neither.
+    """
+    selected = set(selected_categories)
+    answered_categories = {
+        QUESTIONS_BY_ID[qid].category for qid in answered_question_ids if qid in QUESTIONS_BY_ID
+    }
+    scores: dict[str, float] = {}
+    for category in CATEGORY_LABELS:
+        if category in selected:
+            scores[category] = RADAR_SELECTED_SCORE
+        elif category in answered_categories:
+            scores[category] = RADAR_ANSWERED_SCORE
+        else:
+            scores[category] = RADAR_UNREPRESENTED_SCORE
     return scores
 
 

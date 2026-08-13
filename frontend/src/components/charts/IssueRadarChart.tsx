@@ -92,7 +92,7 @@ export function IssueRadarChart({
           <PolarGrid stroke="#dde3ed" strokeOpacity={0.7} />
           <PolarAngleAxis dataKey="category" tick={renderCategoryTick} />
           <Radar
-            name="You"
+            name="Your priorities"
             dataKey="You"
             stroke="#0f2340"
             strokeDasharray="4 3"

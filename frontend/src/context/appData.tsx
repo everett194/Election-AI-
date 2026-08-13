@@ -7,11 +7,9 @@
 import { createContext, useContext, useCallback, useMemo, useState, type ReactNode } from 'react'
 import * as api from '../api'
 import type { ApiRace, ApiQuestion, CandidateProfile, ResultsResponse, Office } from '../api'
+import { buildActiveQuestions, MAX_SELECTED_CATEGORIES } from '../lib/activeQuestions'
 
 export type FetchStatus = 'idle' | 'loading' | 'loaded' | 'error'
-export type ImportanceLevel = 'low' | 'medium' | 'high'
-
-export const IMPORTANCE_TO_SCORE: Record<ImportanceLevel, number> = { low: 1, medium: 3, high: 5 }
 
 export function candidateKey(office: string, name: string): string {
   return `${office}::${name}`
@@ -51,10 +49,12 @@ interface AppDataContextType {
   toggleComparison: (office: Office, name: string) => void
   clearComparison: () => void
 
+  selectedIssueCategories: string[]
+  toggleIssueCategory: (categoryId: string) => void
+  activeQuestions: ApiQuestion[]
+
   quizAnswers: Record<string, number | null>
-  quizImportance: Record<string, ImportanceLevel>
   setQuizAnswer: (questionId: string, value: number | null) => void
-  setQuizImportance: (questionId: string, value: ImportanceLevel) => void
   resetQuiz: () => void
 
   results: ResultsResponse | null
@@ -82,18 +82,30 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
 
   const [comparisonKeys, setComparisonKeys] = useState<string[]>([])
 
+  const [selectedIssueCategories, setSelectedIssueCategories] = useState<string[]>([])
   const [quizAnswers, setQuizAnswers] = useState<Record<string, number | null>>({})
-  const [quizImportance, setQuizImportance] = useState<Record<string, ImportanceLevel>>({})
 
   const [results, setResults] = useState<ResultsResponse | null>(null)
   const [resultsStatus, setResultsStatus] = useState<FetchStatus>('idle')
   const [resultsError, setResultsError] = useState<string | null>(null)
 
+  const activeQuestions = useMemo(
+    () => buildActiveQuestions(questions, selectedIssueCategories),
+    [questions, selectedIssueCategories],
+  )
+
   // Core candidate-research fetch, factored out of ensureRaceResearched so it
   // can also be kicked off directly with fresh race data inside
   // searchElections -- calling ensureRaceResearched there would read stale
   // `elections` state, since setElections's effect hasn't landed yet.
-  const researchRace = useCallback(async (zipcode: string, race: ApiRace) => {
+  //
+  // `selectedCategories`, when given, asks the backend for an additional
+  // targeted research pass on top of its always-broad initial search (see
+  // election_lookup.research_candidates_via_tavily) -- used for the
+  // priority top-up in ensurePriorityResearch, not the initial background
+  // research kicked off right after an election search (which runs before
+  // the voter has chosen priorities at all).
+  const researchRace = useCallback(async (zipcode: string, race: ApiRace, selectedCategories?: string[]) => {
     if (race.candidates.length === 0) return
     setRaceResearchStatus((prev) => ({ ...prev, [race.office]: 'loading' }))
     setRaceResearchError((prev) => ({ ...prev, [race.office]: null }))
@@ -103,6 +115,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
         office: race.office,
         jurisdiction_name: race.jurisdiction_name,
         candidates: race.candidates.map((c) => ({ name: c.name, party: c.party, incumbent: c.incumbent })),
+        ...(selectedCategories && selectedCategories.length > 0 ? { selected_categories: selectedCategories } : {}),
       })
       setProfiles((prev) => {
         const next = { ...prev }
@@ -186,6 +199,30 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
     )
   }, [elections.races, ensureRaceResearched])
 
+  // Targeted top-up pass: only re-researches a race if at least one of its
+  // already-researched candidates is missing sourced coverage of one of the
+  // voter's selected priority categories -- races with full coverage
+  // already are left untouched, so this never re-runs research that already
+  // produced adequate coverage. Called from computeResults, so it runs
+  // during the existing "computing results" step rather than blocking the
+  // questionnaire itself.
+  const ensurePriorityResearch = useCallback(async () => {
+    if (selectedIssueCategories.length === 0) return
+    await Promise.all(
+      elections.races
+        .filter((race) => race.candidates.length > 0)
+        .map(async (race) => {
+          const needsPriorityPass = race.candidates.some((c) => {
+            const profile = profiles[candidateKey(race.office, c.name)]
+            if (!profile) return true
+            return selectedIssueCategories.some((cat) => !profile.categories_covered.includes(cat))
+          })
+          if (!needsPriorityPass) return
+          await researchRace(elections.zipcode, race, selectedIssueCategories)
+        }),
+    )
+  }, [elections.races, elections.zipcode, profiles, selectedIssueCategories, researchRace])
+
   const toggleComparison = useCallback((office: Office, name: string) => {
     const key = candidateKey(office, name)
     setComparisonKeys((prev) => {
@@ -197,17 +234,21 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
 
   const clearComparison = useCallback(() => setComparisonKeys([]), [])
 
+  const toggleIssueCategory = useCallback((categoryId: string) => {
+    setSelectedIssueCategories((prev) => {
+      if (prev.includes(categoryId)) return prev.filter((c) => c !== categoryId)
+      if (prev.length >= MAX_SELECTED_CATEGORIES) return prev
+      return [...prev, categoryId]
+    })
+  }, [])
+
   const setQuizAnswer = useCallback((questionId: string, value: number | null) => {
     setQuizAnswers((prev) => ({ ...prev, [questionId]: value }))
   }, [])
 
-  const setQuizImportanceValue = useCallback((questionId: string, value: ImportanceLevel) => {
-    setQuizImportance((prev) => ({ ...prev, [questionId]: value }))
-  }, [])
-
   const resetQuiz = useCallback(() => {
+    setSelectedIssueCategories([])
     setQuizAnswers({})
-    setQuizImportance({})
     setResults(null)
     setResultsStatus('idle')
     setResultsError(null)
@@ -218,13 +259,18 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
     setResultsError(null)
     try {
       await ensureAllRacesResearched()
+      await ensurePriorityResearch()
+
+      // Only answers to questions still in the active (personalized)
+      // questionnaire are ever submitted -- if the voter changed their
+      // selected categories after answering a question that's since dropped
+      // out of the active set, that answer is silently excluded rather than
+      // scored.
+      const activeQuestionIds = new Set(activeQuestions.map((q) => q.id))
       const answerEntries = Object.entries(quizAnswers).filter(
-        (entry): entry is [string, number] => entry[1] !== null && entry[1] !== undefined,
+        (entry): entry is [string, number] =>
+          entry[1] !== null && entry[1] !== undefined && activeQuestionIds.has(entry[0]),
       )
-      const importanceScores: Record<string, number> = {}
-      for (const [id, level] of Object.entries(quizImportance)) {
-        importanceScores[id] = IMPORTANCE_TO_SCORE[level]
-      }
 
       const candidatesForScoring = elections.races.flatMap((race) =>
         race.candidates.map((c) => {
@@ -235,7 +281,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
 
       const response = await api.getResults({
         answers: Object.fromEntries(answerEntries),
-        importance: importanceScores,
+        selected_categories: selectedIssueCategories,
         candidates: candidatesForScoring,
       })
       setResults(response)
@@ -244,7 +290,15 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       setResultsStatus('error')
       setResultsError(err instanceof api.ApiError ? err.message : 'Could not compute your results.')
     }
-  }, [ensureAllRacesResearched, elections.races, profiles, quizAnswers, quizImportance])
+  }, [
+    ensureAllRacesResearched,
+    ensurePriorityResearch,
+    elections.races,
+    profiles,
+    quizAnswers,
+    activeQuestions,
+    selectedIssueCategories,
+  ])
 
   const value = useMemo<AppDataContextType>(
     () => ({
@@ -261,10 +315,11 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       comparisonKeys,
       toggleComparison,
       clearComparison,
+      selectedIssueCategories,
+      toggleIssueCategory,
+      activeQuestions,
       quizAnswers,
-      quizImportance,
       setQuizAnswer,
-      setQuizImportance: setQuizImportanceValue,
       resetQuiz,
       results,
       resultsStatus,
@@ -285,10 +340,11 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       comparisonKeys,
       toggleComparison,
       clearComparison,
+      selectedIssueCategories,
+      toggleIssueCategory,
+      activeQuestions,
       quizAnswers,
-      quizImportance,
       setQuizAnswer,
-      setQuizImportanceValue,
       resetQuiz,
       results,
       resultsStatus,

@@ -1,11 +1,11 @@
 """
 answer_storage.py
 
-Best-effort persistence of questionnaire submissions (answers + importance
-levels only -- no name, email, or other identifying information) to
-Postgres. Storage is optional: if DATABASE_URL isn't set, or the database is
-briefly unreachable, calls here are silently skipped/logged rather than
-breaking the /api/results response that triggers them.
+Best-effort persistence of questionnaire submissions (answers + selected
+priority categories only -- no name, email, or other identifying
+information) to Postgres. Storage is optional: if DATABASE_URL isn't set, or
+the database is briefly unreachable, calls here are silently skipped/logged
+rather than breaking the /api/results response that triggers them.
 
 Set DATABASE_URL to a Postgres connection string (Render's managed Postgres
 provides one) to enable storage.
@@ -26,12 +26,12 @@ CREATE TABLE IF NOT EXISTS questionnaire_submissions (
     id SERIAL PRIMARY KEY,
     submitted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     answers JSONB NOT NULL,
-    importance JSONB NOT NULL
+    selected_categories JSONB NOT NULL
 )
 """
 
 
-def save_submission(answers: dict[str, Any], importance: dict[str, Any]) -> None:
+def save_submission(answers: dict[str, Any], selected_categories: list[str]) -> None:
     """Stores one questionnaire submission. Never raises -- a storage
     failure must not break the results the user is waiting on."""
     database_url = os.environ.get("DATABASE_URL")
@@ -51,8 +51,8 @@ def save_submission(answers: dict[str, Any], importance: dict[str, Any]) -> None
             with conn.cursor() as cur:
                 cur.execute(_SCHEMA)
                 cur.execute(
-                    "INSERTT INTO questionnaire_submissions (answers, importance) VALUES (%s, %s)",
-                    (json.dumps(answers), json.dumps(importance)),
+                    "INSERTT INTO questionnaire_submissions (answers, selected_categories) VALUES (%s, %s)",
+                    (json.dumps(answers), json.dumps(selected_categories)),
                 )
     except Exception:
         logger.exception("Failed to store questionnaire submission")

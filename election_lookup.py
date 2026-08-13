@@ -6,12 +6,12 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Callable, Iterator, Literal, TypeVar
+from typing import Callable, Iterable, Iterator, Literal, TypeVar
 
 import anthropic
 
 import tavily_search
-from questionnaire_scoring import QUESTIONS, QUESTIONS_BY_ID
+from questionnaire_scoring import CATEGORY_LABELS, QUESTIONS, QUESTIONS_BY_ID
 
 _T = TypeVar("_T")
 
@@ -1127,18 +1127,23 @@ def predict_candidates_for_race(
 
 _VALID_INFERENCE_LEVELS = {"explicit", "strong_inference", "weak_inference"}
 
+_OFFICE_LABELS = {"mayor": "mayor", "county": "county", "us_house": "U.S. House"}
+
+# Cap on how many extra priority-category queries one candidate can get in
+# the targeted pass (see _priority_search_queries / research_candidates_via_tavily)
+# -- keeps a voter who selects several priority categories from blowing up
+# Tavily cost/rate limits with one candidate alone.
+_MAX_PRIORITY_QUERIES_PER_CANDIDATE = 10
+
 
 def _candidate_search_queries(candidate_name: str, office: str, jurisdiction_name: str) -> "list[str]":
-    """7 queries -- this research runs automatically in the background for
+    """7 broad queries covering every category, not just any one issue --
+    this is the initial pass that runs automatically in the background for
     every candidate as soon as a race is found (not something the user is
     blocked waiting on), so it can afford real thoroughness: more distinct
     source types means more genuine "explicit"/"strong_inference" evidence
     surfaces naturally, without loosening how that evidence gets classified."""
-    office_label = {
-        "mayor": "mayor",
-        "county": "county",
-        "us_house": "U.S. House",
-    }.get(office, office)
+    office_label = _OFFICE_LABELS.get(office, office)
     return [
         f"{candidate_name} {jurisdiction_name} {office_label} Ballotpedia",
         f"{candidate_name} {jurisdiction_name} {office_label} Vote411 voter guide",
@@ -1148,6 +1153,37 @@ def _candidate_search_queries(candidate_name: str, office: str, jurisdiction_nam
         f"{candidate_name} {jurisdiction_name} {office_label} news interview",
         f"{candidate_name} {jurisdiction_name} {office_label} endorsement forum debate",
     ]
+
+
+def _priority_search_queries(
+    candidate_name: str, office: str, jurisdiction_name: str, category: str
+) -> "list[str]":
+    """5 targeted query variants for one candidate's coverage of ONE
+    selected-priority category the broad pass didn't already source -- built
+    from that category's question text, approach language, and any
+    research_terms, per the framework's query-variant list (category,
+    specific policy, interview/questionnaire, official/campaign site,
+    council/board meeting). Only called for a category a candidate is
+    missing; never re-fired for a category the broad pass already covered."""
+    office_label = _OFFICE_LABELS.get(office, office)
+    category_label = CATEGORY_LABELS[category]
+    category_questions = [q for q in QUESTIONS if q.category == category]
+    policy_terms = [term for q in category_questions for term in q.research_terms]
+    policy_phrase = policy_terms[0] if policy_terms else (
+        category_questions[0].text if category_questions else category_label
+    )
+    return [
+        f"{candidate_name} {jurisdiction_name} {office_label} {category_label}",
+        f"{candidate_name} {jurisdiction_name} {office_label} {policy_phrase}",
+        f"{candidate_name} {jurisdiction_name} {office_label} interview questionnaire {category_label}",
+        f"{candidate_name} {jurisdiction_name} {office_label} official campaign site {category_label}",
+        f"{candidate_name} {jurisdiction_name} {office_label} council board meeting {category_label}",
+    ]
+
+
+def _dedupe_queries(queries: "list[str]") -> "list[str]":
+    """Deduplicates query strings while preserving first-seen order."""
+    return list(dict.fromkeys(queries))
 
 
 def _format_evidence_block(
@@ -1305,6 +1341,7 @@ def research_candidates_via_tavily(
     jurisdiction_name: str,
     candidates: "list[Candidate]",
     client: "anthropic.Anthropic | None" = None,
+    selected_categories: "Iterable[str] | None" = None,
 ) -> "dict[str, CandidateIssueProfile]":
     """Real, sourced candidate research via Tavily search + one Claude
     synthesis call per race. Faster than research_candidates_for_race
@@ -1313,6 +1350,19 @@ def research_candidates_via_tavily(
     parallel (safe here -- Tavily is a plain search API, not subject to the
     Anthropic-call rate-limit issue this project hit with parallel Claude
     calls; see git history).
+
+    The first pass is always the broad, 7-query-per-candidate search above,
+    covering every category -- this always runs, so research never narrows
+    to only a voter's chosen issues. When `selected_categories` is given, a
+    second targeted pass follows: for any candidate still missing sourced
+    coverage of one of those categories after the broad pass, it fires a
+    handful of category-specific queries (see _priority_search_queries) and
+    asks Claude to fill just those gaps. A category the broad pass already
+    covered for a candidate is never re-searched, and candidates with full
+    coverage of every selected category skip the second pass entirely --
+    this is what keeps the priority pass from rerunning searches that
+    already produced adequate coverage. When `selected_categories` is empty
+    or None, this is identical to a broad-only pass.
     """
     if not candidates:
         return {}
@@ -1328,8 +1378,10 @@ def research_candidates_via_tavily(
         candidate.name: _candidate_search_queries(candidate.name, office, jurisdiction_name)
         for candidate in candidates
     }
-    all_queries = [query for queries in queries_by_candidate.values() for query in queries]
-    results_by_query = tavily_search.search_many(all_queries, max_results_per_query=6)
+    broad_queries = _dedupe_queries(
+        [query for queries in queries_by_candidate.values() for query in queries]
+    )
+    results_by_query = tavily_search.search_many(broad_queries, max_results_per_query=6)
 
     evidence_block = "\n\n".join(
         _format_evidence_block(
@@ -1351,17 +1403,105 @@ def research_candidates_via_tavily(
 
     candidate_names = [candidate.name for candidate in candidates]
 
-    def parse(text: str) -> "dict[str, CandidateIssueProfile]":
+    def parse_broad(text: str) -> "dict[str, CandidateIssueProfile]":
         return parse_candidates_evidence_response(office, candidate_names, text)
 
-    return _call_model_and_parse(
+    profiles = _call_model_and_parse(
         client,
         prompt,
         max_tokens=min(8000, 3000 + 1500 * len(candidates)),
         refusal_subject=f"candidate evidence analysis for the {office} race",
-        parse=parse,
+        parse=parse_broad,
         use_web_search=False,
     )
+
+    selected = set(selected_categories or [])
+    if not selected:
+        return profiles
+
+    gap_candidates: list[Candidate] = []
+    gap_queries_by_candidate: dict[str, list[str]] = {}
+    for candidate in candidates:
+        profile = profiles.get(candidate.name)
+        covered = profile.covered_categories() if profile else set()
+        missing = [category for category in CATEGORY_LABELS if category in selected and category not in covered]
+        if not missing:
+            continue
+        queries = []
+        for category in missing:
+            queries.extend(_priority_search_queries(candidate.name, office, jurisdiction_name, category))
+        already_asked = set(queries_by_candidate[candidate.name])
+        queries = [q for q in _dedupe_queries(queries) if q not in already_asked]
+        queries = queries[:_MAX_PRIORITY_QUERIES_PER_CANDIDATE]
+        if queries:
+            gap_candidates.append(candidate)
+            gap_queries_by_candidate[candidate.name] = queries
+
+    if not gap_candidates:
+        return profiles
+
+    gap_all_queries = _dedupe_queries(
+        [query for queries in gap_queries_by_candidate.values() for query in queries]
+    )
+    gap_results_by_query = tavily_search.search_many(gap_all_queries, max_results_per_query=6)
+
+    gap_evidence_block = "\n\n".join(
+        _format_evidence_block(
+            candidate.name,
+            {
+                **{query: results_by_query.get(query, []) for query in queries_by_candidate[candidate.name]},
+                **{
+                    query: gap_results_by_query.get(query, [])
+                    for query in gap_queries_by_candidate[candidate.name]
+                },
+            },
+        )
+        for candidate in gap_candidates
+    )
+
+    gap_prompt = CANDIDATE_EVIDENCE_EXTRAPOLATION_PROMPT_TEMPLATE.format(
+        candidate_count=len(gap_candidates),
+        office_description=OFFICE_DESCRIPTIONS[office],
+        jurisdiction_name=jurisdiction_name,
+        zipcode=zipcode,
+        evidence_block=gap_evidence_block,
+        question_count=len(QUESTIONS),
+        questions_block=_format_questions_block(),
+    )
+    gap_names = [candidate.name for candidate in gap_candidates]
+
+    def parse_gap(text: str) -> "dict[str, CandidateIssueProfile]":
+        return parse_candidates_evidence_response(office, gap_names, text)
+
+    gap_profiles = _call_model_and_parse(
+        client,
+        gap_prompt,
+        max_tokens=min(8000, 3000 + 1500 * len(gap_candidates)),
+        refusal_subject=f"priority-category evidence analysis for the {office} race",
+        parse=parse_gap,
+        use_web_search=False,
+    )
+
+    for name, gap_profile in gap_profiles.items():
+        base = profiles.get(name)
+        if base is None:
+            profiles[name] = gap_profile
+            continue
+        merged_positions = dict(base.positions)
+        merged_sourced = list(base.sourced_positions)
+        for position in gap_profile.sourced_positions:
+            if position.question_id in merged_positions:
+                continue  # broad pass already sourced this question -- keep it
+            merged_positions[position.question_id] = position.position
+            merged_sourced.append(position)
+        profiles[name] = CandidateIssueProfile(
+            candidate_name=name,
+            office=office,
+            positions=merged_positions,
+            sourced_positions=merged_sourced,
+        )
+
+    return profiles
 
 
 def research_candidates_for_race_with_fallback(
@@ -1370,6 +1510,7 @@ def research_candidates_for_race_with_fallback(
     jurisdiction_name: str,
     candidates: "list[Candidate]",
     client: "anthropic.Anthropic | None" = None,
+    selected_categories: "Iterable[str] | None" = None,
 ) -> "dict[str, CandidateIssueProfile]":
     """Combines real, sourced research (research_candidates_via_tavily) with
     a speculative fallback (predict_candidates_for_race) so every candidate
@@ -1383,11 +1524,20 @@ def research_candidates_for_race_with_fallback(
     Speculation is only requested for candidates whose sourced profile is
     missing at least one of the 20 questions -- a candidate with full real
     coverage never gets a speculative call at all.
+
+    `selected_categories` is forwarded to research_candidates_via_tavily to
+    optionally add a targeted research pass for a voter's priority
+    categories; see that function for exactly when it fires. It's optional
+    so callers researching a race before the voter has chosen priorities
+    (e.g. the background research kicked off right after an election
+    search) keep working unchanged.
     """
     if not candidates:
         return {}
 
-    sourced_profiles = research_candidates_via_tavily(zipcode, office, jurisdiction_name, candidates, client)
+    sourced_profiles = research_candidates_via_tavily(
+        zipcode, office, jurisdiction_name, candidates, client, selected_categories=selected_categories
+    )
 
     needs_speculation = [
         candidate

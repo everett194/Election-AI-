@@ -90,6 +90,9 @@ export interface ApiQuestion {
   text: string
   approach_1: string
   approach_2: string
+  is_core: boolean
+  selection_priority: number
+  research_terms: string[]
 }
 
 export type IssueConfidence = 'explicit' | 'strong_inference' | 'weak_inference' | 'speculative'
@@ -149,13 +152,14 @@ export function researchCandidates(body: {
   office: Office
   jurisdiction_name: string
   candidates: { name: string; party: string | null; incumbent: boolean | null }[]
+  selected_categories?: string[]
 }): Promise<ResearchResponse> {
   return request('/api/candidates/research', { method: 'POST', body: JSON.stringify(body) })
 }
 
 export function getResults(body: {
   answers: Record<string, number>
-  importance: Record<string, number>
+  selected_categories: string[]
   candidates: { name: string; office: Office; positions: Record<string, number> }[]
 }): Promise<ResultsResponse> {
   return request('/api/results', { method: 'POST', body: JSON.stringify(body) })

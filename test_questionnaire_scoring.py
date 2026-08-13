@@ -1,11 +1,16 @@
 import pytest
 
 from questionnaire_scoring import (
+    CATEGORY_LABELS,
+    MAX_ACTIVE_QUESTIONS,
+    MAX_ADDITIONAL_PER_CATEGORY,
     QUESTIONS,
     QUESTIONS_BY_ID,
+    build_active_questions,
     compute_candidate_compatibility,
     compute_compass_scores,
     compute_radar_scores,
+    derive_effective_weights,
 )
 
 
@@ -31,39 +36,124 @@ def _housing_question_ids():
     return [q.id for q in QUESTIONS if q.category == "housing"]
 
 
-def test_radar_score_is_100_when_all_answers_in_category_are_top_importance():
-    housing_ids = _housing_question_ids()
-    importance = {qid: 5 for qid in housing_ids}
-    scores = compute_radar_scores(importance)
+# --- Personalized questionnaire builder (build_active_questions) ------------
+
+
+def test_exactly_five_questions_are_marked_core():
+    core = [q for q in QUESTIONS if q.is_core]
+    assert len(core) == 5
+    # The 5 core questions collectively cover taxes, housing, safety,
+    # education, and accountability -- the "general" areas every voter sees.
+    assert {q.category for q in core} == {"taxes", "housing", "safety", "education", "accountability"}
+
+
+def test_all_question_ids_are_unique():
+    ids = [q.id for q in QUESTIONS]
+    assert len(ids) == len(set(ids))
+
+
+def test_every_category_has_enough_selectable_non_core_questions():
+    for category in CATEGORY_LABELS:
+        selectable = [q for q in QUESTIONS if q.category == category and not q.is_core]
+        assert len(selectable) >= MAX_ADDITIONAL_PER_CATEGORY
+
+
+def test_build_active_questions_always_includes_all_five_core_questions():
+    active = build_active_questions(["housing"])
+    core_ids = {q.id for q in QUESTIONS if q.is_core}
+    active_ids = {q.id for q in active}
+    assert core_ids <= active_ids
+
+
+def test_build_active_questions_one_category_stays_within_cap():
+    active = build_active_questions(["housing"])
+    assert len(active) <= MAX_ACTIVE_QUESTIONS
+    # 5 core + up to 2 additional housing questions.
+    assert len(active) <= 7
+
+
+def test_build_active_questions_four_categories_stays_within_cap():
+    active = build_active_questions(["housing", "taxes", "safety", "education"])
+    assert len(active) <= MAX_ACTIVE_QUESTIONS
+
+
+def test_build_active_questions_never_repeats_a_question():
+    active = build_active_questions(["housing", "taxes", "safety", "education"])
+    ids = [q.id for q in active]
+    assert len(ids) == len(set(ids))
+
+
+def test_build_active_questions_is_deterministic_regardless_of_selection_order():
+    forward = [q.id for q in build_active_questions(["taxes", "housing", "safety", "education"])]
+    reverse = [q.id for q in build_active_questions(["education", "safety", "housing", "taxes"])]
+    assert forward == reverse
+
+
+def test_build_active_questions_adds_up_to_two_per_selected_category():
+    active = build_active_questions(["transportation"])
+    transportation_ids = {q.id for q in active if q.category == "transportation"}
+    assert len(transportation_ids) == 2
+
+
+def test_build_active_questions_never_exceeds_twelve_for_all_seven_categories():
+    active = build_active_questions(list(CATEGORY_LABELS))
+    assert len(active) <= MAX_ACTIVE_QUESTIONS
+
+
+# --- Effective weight derivation (derive_effective_weights) ------------------
+
+
+def test_selected_category_question_gets_weight_five():
+    weights = derive_effective_weights(["housing"], ["housing_zoning_density"])
+    assert weights["housing_zoning_density"] == 5
+
+
+def test_nonselected_core_question_gets_baseline_weight_two_not_zero():
+    # taxes_shortfall is a core question but "taxes" was not selected here.
+    weights = derive_effective_weights(["housing"], ["taxes_shortfall"])
+    assert weights["taxes_shortfall"] == 2
+    assert weights["taxes_shortfall"] != 0
+
+
+def test_derive_effective_weights_ignores_unanswered_question_ids():
+    weights = derive_effective_weights(["housing"], ["housing_zoning_density"])
+    assert "taxes_shortfall" not in weights
+    assert set(weights.keys()) == {"housing_zoning_density"}
+
+
+def test_derive_effective_weights_skips_unknown_question_id():
+    weights = derive_effective_weights(["housing"], ["not_a_real_question"])
+    assert weights == {}
+
+
+# --- Priority radar (compute_radar_scores) -----------------------------------
+
+
+def test_radar_score_is_100_for_selected_category():
+    scores = compute_radar_scores(["housing"], [])
     assert scores["housing"] == pytest.approx(100.0)
 
 
-def test_radar_score_is_0_when_all_answers_in_category_are_lowest_importance():
-    housing_ids = _housing_question_ids()
-    importance = {qid: 1 for qid in housing_ids}
-    scores = compute_radar_scores(importance)
-    assert scores["housing"] == pytest.approx(0.0)
+def test_radar_score_is_40_for_nonselected_but_answered_category():
+    scores = compute_radar_scores(["housing"], ["taxes_shortfall"])
+    assert scores["taxes"] == pytest.approx(40.0)
 
 
-def test_radar_score_is_50_for_moderate_importance():
-    housing_ids = _housing_question_ids()
-    importance = {qid: 3 for qid in housing_ids}
-    scores = compute_radar_scores(importance)
-    assert scores["housing"] == pytest.approx(50.0)
+def test_radar_score_is_0_for_completely_unrepresented_category():
+    scores = compute_radar_scores(["housing"], ["taxes_shortfall"])
+    assert scores["safety"] == pytest.approx(0.0)
 
 
-def test_radar_score_is_0_for_unanswered_category():
-    scores = compute_radar_scores({})
-    assert scores["taxes"] == pytest.approx(0.0)
-    assert set(scores.keys()) == {
-        "housing",
-        "taxes",
-        "safety",
-        "education",
-        "transportation",
-        "environment",
-        "accountability",
-    }
+def test_radar_score_selected_category_wins_over_answered_baseline():
+    # A category that's both selected AND answered still scores 100, not 40.
+    scores = compute_radar_scores(["housing"], ["housing_zoning_density"])
+    assert scores["housing"] == pytest.approx(100.0)
+
+
+def test_radar_scores_cover_all_seven_categories():
+    scores = compute_radar_scores([], [])
+    assert set(scores.keys()) == set(CATEGORY_LABELS)
+    assert all(v == pytest.approx(0.0) for v in scores.values())
 
 
 def test_compass_econ_score_at_positive_extreme():
@@ -167,3 +257,50 @@ def test_compatibility_by_category_weighted_average():
     # q2: compat=0, importance=1 -> weight*compat = 0
     # category avg = (5+0)/(5+1) = 0.8333 -> 83.33%
     assert result["by_category"]["housing"] == pytest.approx(500 / 6)
+
+
+# --- End-to-end: derive_effective_weights feeding compute_candidate_compatibility ---
+
+
+def test_unasked_questions_do_not_affect_compatibility():
+    # Only the answered question is ever in voter_answers, so derive_effective_weights
+    # never produces a weight for an unasked question, and compute_candidate_compatibility
+    # never sees it -- adding more QUESTIONS to the bank can't change this result.
+    answers = {"housing_zoning_density": 5}
+    weights = derive_effective_weights(["housing"], answers.keys())
+    result = compute_candidate_compatibility(answers, weights, {"housing_zoning_density": 5})
+    assert result["overall_pct"] == pytest.approx(100.0)
+    assert result["question_count"] == 1
+
+
+def test_skipped_question_does_not_affect_compatibility():
+    # A "Not Sure / Skip" answer is simply never added to voter_answers by the
+    # frontend, so it behaves identically to an unasked question here.
+    answers = {"housing_zoning_density": 5}  # taxes_shortfall was skipped, never included
+    weights = derive_effective_weights(["housing"], answers.keys())
+    result = compute_candidate_compatibility(
+        answers, weights, {"housing_zoning_density": 5, "taxes_shortfall": 1}
+    )
+    assert result["question_count"] == 1
+
+
+def test_unknown_candidate_position_remains_excluded_even_with_derived_weights():
+    answers = {"housing_zoning_density": 5, "taxes_shortfall": 2}
+    weights = derive_effective_weights(["housing"], answers.keys())
+    # Candidate has no documented position on taxes_shortfall at all.
+    result = compute_candidate_compatibility(answers, weights, {"housing_zoning_density": 5})
+    assert result["question_count"] == 1
+    assert "taxes" not in result["by_category"]
+
+
+def test_selected_category_weight_dominates_nonselected_in_overall_compatibility():
+    # housing selected (weight 5, mismatched), taxes nonselected (weight 2, perfect match) --
+    # overall should be pulled toward the mismatch since it's weighted more heavily.
+    answers = {"housing_zoning_density": 5, "taxes_shortfall": 2}
+    weights = derive_effective_weights(["housing"], answers.keys())
+    result = compute_candidate_compatibility(
+        answers, weights, {"housing_zoning_density": 1, "taxes_shortfall": 2}
+    )
+    # housing: compat=0, weight=5 -> 0; taxes: compat=1, weight=2 -> 2
+    # overall = 100 * 2 / 7
+    assert result["overall_pct"] == pytest.approx(200 / 7)
