@@ -284,6 +284,18 @@ def test_candidate_issue_profile_covered_axes_none_covered():
     assert profile.covered_axes() == (False, False)
 
 
+def test_candidate_issue_profile_emphasis_defaults_to_empty_dict():
+    profile = CandidateIssueProfile(candidate_name="Jane Doe", office="mayor", positions={})
+    assert profile.emphasis == {}
+
+
+def test_candidate_issue_profile_accepts_explicit_emphasis():
+    profile = CandidateIssueProfile(
+        candidate_name="Jane Doe", office="mayor", positions={}, emphasis={"housing": 4}
+    )
+    assert profile.emphasis == {"housing": 4}
+
+
 def _mock_response(text: str):
     text_block = MagicMock()
     text_block.type = "text"
@@ -1021,6 +1033,17 @@ def test_priority_search_queries_returns_five_variants_using_research_terms():
     assert len(queries) == 5
     assert all("Jane Doe" in q and "Springfield" in q for q in queries)
     assert any("zoning reform" in q for q in queries)
+
+
+def test_candidate_search_queries_returns_twelve_queries_including_osint_platforms():
+    queries = election_lookup._candidate_search_queries("Jane Doe", "mayor", "Springfield")
+    assert len(queries) == 12
+    joined = " | ".join(queries).lower()
+    assert "twitter" in joined
+    assert "facebook" in joined
+    assert "instagram" in joined
+    assert "official campaign website" in joined
+    assert all("Jane Doe" in q and "Springfield" in q for q in queries)
 
 
 def test_dedupe_queries_preserves_order_and_removes_duplicates():

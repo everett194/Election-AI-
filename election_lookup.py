@@ -74,6 +74,7 @@ class CandidateIssueProfile:
     office: Literal["mayor", "county", "us_house"]
     positions: dict[str, int]  # question_id -> 1-5; feeds compute_candidate_compatibility directly
     sourced_positions: list[CandidateIssuePosition] = field(default_factory=list)
+    emphasis: dict[str, int] = field(default_factory=dict)  # category -> 1-5 OSINT "how much do they talk about this" score
 
     def covered_categories(self) -> set[str]:
         """Categories with at least one sourced position -- the only categories
@@ -1137,12 +1138,16 @@ _MAX_PRIORITY_QUERIES_PER_CANDIDATE = 10
 
 
 def _candidate_search_queries(candidate_name: str, office: str, jurisdiction_name: str) -> "list[str]":
-    """7 broad queries covering every category, not just any one issue --
-    this is the initial pass that runs automatically in the background for
-    every candidate as soon as a race is found (not something the user is
-    blocked waiting on), so it can afford real thoroughness: more distinct
-    source types means more genuine "explicit"/"strong_inference" evidence
-    surfaces naturally, without loosening how that evidence gets classified."""
+    """12 broad queries covering every category AND general OSINT platforms
+    (official site, X/Twitter, Facebook, Instagram, campaign social media),
+    not just any one issue -- this is the initial pass that runs
+    automatically in the background for every candidate as soon as a race is
+    found (not something the user is blocked waiting on), so it can afford
+    real thoroughness: more distinct source types means more genuine
+    "explicit"/"strong_inference" position evidence AND a fuller picture of
+    how much the candidate actually talks about each topic (see
+    CandidateIssueProfile.emphasis), without loosening how evidence gets
+    classified."""
     office_label = _OFFICE_LABELS.get(office, office)
     return [
         f"{candidate_name} {jurisdiction_name} {office_label} Ballotpedia",
@@ -1152,6 +1157,11 @@ def _candidate_search_queries(candidate_name: str, office: str, jurisdiction_nam
         f"{candidate_name} {jurisdiction_name} {office_label} candidate questionnaire survey",
         f"{candidate_name} {jurisdiction_name} {office_label} news interview",
         f"{candidate_name} {jurisdiction_name} {office_label} endorsement forum debate",
+        f"{candidate_name} {jurisdiction_name} {office_label} official campaign website platform issues",
+        f"{candidate_name} {jurisdiction_name} {office_label} X Twitter",
+        f"{candidate_name} {jurisdiction_name} {office_label} Facebook page",
+        f"{candidate_name} {jurisdiction_name} {office_label} Instagram",
+        f"{candidate_name} {jurisdiction_name} {office_label} campaign social media posts",
     ]
 
 
