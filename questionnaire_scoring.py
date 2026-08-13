@@ -324,6 +324,40 @@ def derive_effective_weights(
     return weights
 
 
+def emphasis_multiplier(emphasis_score: int | None) -> float:
+    """0.7x-1.3x multiplier derived from a candidate's 1-5 OSINT "how much
+    do they talk about this issue" emphasis score for one category (see
+    election_lookup.CandidateIssueProfile.emphasis). None means no OSINT
+    signal was found for this category (e.g. a purely speculative profile,
+    or a category the gathered evidence simply never touched on) -- that is
+    treated as neutral (1.0x), never as a penalty, since absence of a
+    measured signal isn't the same as confirmed silence on the issue.
+    """
+    if emphasis_score is None:
+        return 1.0
+    return 0.7 + 0.15 * (emphasis_score - 1)
+
+
+def derive_candidate_weights(
+    ranked_categories: Iterable[str],
+    answered_question_ids: Iterable[str],
+    candidate_emphasis: dict[str, int],
+) -> dict[str, float]:
+    """Per-candidate effective weight: the voter's rank-based weight (see
+    derive_effective_weights) scaled by THIS candidate's emphasis on that
+    question's category. Two candidates can therefore get different weights
+    for the exact same voter question -- intentional: a candidate who talks
+    more about a voter's priority issue counts that issue more heavily in
+    their own match score, and one who's relatively silent on it counts it
+    somewhat less (never zero).
+    """
+    base_weights = derive_effective_weights(ranked_categories, answered_question_ids)
+    return {
+        question_id: base_weight * emphasis_multiplier(candidate_emphasis.get(QUESTIONS_BY_ID[question_id].category))
+        for question_id, base_weight in base_weights.items()
+    }
+
+
 RADAR_SCORE_BY_RANK: dict[int, float] = {1: 100.0, 2: 80.0, 3: 60.0, 4: 40.0}
 RADAR_BASELINE_ANSWERED_SCORE = 20.0
 RADAR_UNREPRESENTED_SCORE = 0.0

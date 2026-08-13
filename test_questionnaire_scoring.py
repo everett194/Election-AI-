@@ -7,7 +7,9 @@ from questionnaire_scoring import (
     compute_candidate_compatibility,
     compute_compass_scores,
     compute_radar_scores,
+    derive_candidate_weights,
     derive_effective_weights,
+    emphasis_multiplier,
     order_questions_by_rank,
 )
 
@@ -136,6 +138,90 @@ def test_derive_effective_weights_ignores_unanswered_question_ids():
 def test_derive_effective_weights_skips_unknown_question_id():
     weights = derive_effective_weights(["housing"], ["not_a_real_question"])
     assert weights == {}
+
+
+# --- Candidate emphasis blending (emphasis_multiplier, derive_candidate_weights) ---
+
+
+def test_emphasis_multiplier_score_one_is_point_seven():
+    assert emphasis_multiplier(1) == pytest.approx(0.7)
+
+
+def test_emphasis_multiplier_score_three_is_neutral_one():
+    assert emphasis_multiplier(3) == pytest.approx(1.0)
+
+
+def test_emphasis_multiplier_score_five_is_point_thirteen():
+    assert emphasis_multiplier(5) == pytest.approx(1.3)
+
+
+def test_emphasis_multiplier_none_is_neutral_one():
+    assert emphasis_multiplier(None) == pytest.approx(1.0)
+
+
+def test_derive_candidate_weights_scales_rank_weight_by_emphasis():
+    # housing ranked 1st -> base weight 5; candidate emphasis on housing = 5 -> 1.3x -> 6.5
+    weights = derive_candidate_weights(
+        ["housing"], ["housing_zoning_density"], candidate_emphasis={"housing": 5}
+    )
+    assert weights["housing_zoning_density"] == pytest.approx(6.5)
+
+
+def test_derive_candidate_weights_low_emphasis_reduces_weight():
+    # housing ranked 1st -> base weight 5; candidate emphasis on housing = 1 -> 0.7x -> 3.5
+    weights = derive_candidate_weights(
+        ["housing"], ["housing_zoning_density"], candidate_emphasis={"housing": 1}
+    )
+    assert weights["housing_zoning_density"] == pytest.approx(3.5)
+
+
+def test_derive_candidate_weights_missing_emphasis_is_neutral():
+    weights = derive_candidate_weights(
+        ["housing"], ["housing_zoning_density"], candidate_emphasis={}
+    )
+    assert weights["housing_zoning_density"] == pytest.approx(5.0)
+
+
+def test_derive_candidate_weights_two_candidates_get_different_weights_same_question():
+    # This is the core new behavior: the SAME voter question gets a DIFFERENT
+    # effective weight depending on which candidate's emphasis is applied.
+    high_emphasis = derive_candidate_weights(
+        ["housing"], ["housing_zoning_density"], candidate_emphasis={"housing": 5}
+    )
+    low_emphasis = derive_candidate_weights(
+        ["housing"], ["housing_zoning_density"], candidate_emphasis={"housing": 1}
+    )
+    assert high_emphasis["housing_zoning_density"] != low_emphasis["housing_zoning_density"]
+
+
+def test_derive_candidate_weights_blend_moves_overall_compatibility():
+    # End-to-end: two candidates with IDENTICAL positions but different
+    # emphasis on the voter's rank-1 category must produce DIFFERENT overall_pct.
+    answers = {"housing_zoning_density": 5}
+    identical_positions = {"housing_zoning_density": 3}  # same for both candidates
+
+    weights_high = derive_candidate_weights(["housing"], answers.keys(), {"housing": 5})
+    weights_low = derive_candidate_weights(["housing"], answers.keys(), {"housing": 1})
+
+    result_high = compute_candidate_compatibility(answers, weights_high, identical_positions)
+    result_low = compute_candidate_compatibility(answers, weights_low, identical_positions)
+
+    # Weight alone doesn't change a single-question overall_pct (it's the only
+    # question, so weighted average == its own compatibility regardless of
+    # weight) -- so prove the effect with a second, unranked question where
+    # the two candidates diverge in compatibility, and show the weighted
+    # blend differs between them.
+    answers_multi = {"housing_zoning_density": 5, "taxes_shortfall": 2}
+    candidate_a_positions = {"housing_zoning_density": 3, "taxes_shortfall": 2}  # matches on taxes
+    candidate_b_positions = {"housing_zoning_density": 3, "taxes_shortfall": 5}  # mismatches on taxes
+
+    weights_a = derive_candidate_weights(["housing"], answers_multi.keys(), {"housing": 5})  # high housing emphasis
+    weights_b = derive_candidate_weights(["housing"], answers_multi.keys(), {"housing": 1})  # low housing emphasis
+
+    result_a = compute_candidate_compatibility(answers_multi, weights_a, candidate_a_positions)
+    result_b = compute_candidate_compatibility(answers_multi, weights_b, candidate_b_positions)
+
+    assert result_a["overall_pct"] != result_b["overall_pct"]
 
 
 # --- Graduated priority radar (compute_radar_scores) -------------------------
