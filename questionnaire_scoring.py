@@ -419,7 +419,7 @@ def compute_compass_scores(answer_by_id: dict[str, int]) -> tuple[float, float]:
 
 def compute_candidate_compatibility(
     voter_answers: dict[str, int],
-    voter_importance: dict[str, int],
+    voter_importance: dict[str, float],
     candidate_positions: dict[str, int],
 ) -> dict:
     """Voter-candidate compatibility using only questions where BOTH a voter answer and a
@@ -430,7 +430,7 @@ def compute_candidate_compatibility(
     Returns {"overall_pct": float | None, "by_category": dict[str, float], "question_count": int}.
     overall_pct is None when there are zero qualifying questions.
     """
-    per_question: list[tuple[Question, float, int]] = []
+    per_question: list[tuple[Question, float, float]] = []
     for question in QUESTIONS:
         if question.id not in voter_answers or question.id not in candidate_positions:
             continue
@@ -448,7 +448,7 @@ def compute_candidate_compatibility(
         compatibility * importance for _, compatibility, importance in per_question
     ) / weight_total
 
-    grouped: dict[str, list[tuple[float, int]]] = {}
+    grouped: dict[str, list[tuple[float, float]]] = {}
     for question, compatibility, importance in per_question:
         grouped.setdefault(question.category, []).append((compatibility, importance))
 

@@ -356,20 +356,25 @@ def render_questionnaire(
 
     st.subheader("Your results")
     # This legacy Streamlit UI still collects a per-question 1-5 importance
-    # rating rather than the React app's category-selection flow (see
-    # QuestionnairePage.tsx), so it derives an equivalent "selected
-    # categories" set here: any category the voter rated 4+ ("Very
-    # important" or "One of my top priorities") on average counts as
-    # selected for compute_radar_scores' priority-based (100/40/0) scoring.
+    # rating rather than the React app's rank-based priority flow (see
+    # QuestionnairePage.tsx), so it derives an equivalent ordered "ranked
+    # categories" list here: categories the voter rated 4+ ("Very important"
+    # or "One of my top priorities") on average, sorted by descending average
+    # importance and capped at the top 4, since compute_radar_scores treats
+    # list position as rank (100/80/60/40 for ranks 1-4, 20 for any
+    # unranked category the voter still answered questions in, 0 otherwise).
     importance_by_category: dict[str, list[int]] = {}
     for question_id, importance in st.session_state.questionnaire_importance.items():
         category = QUESTIONS_BY_ID[question_id].category
         importance_by_category.setdefault(category, []).append(importance)
     selected_categories = [
         category
-        for category, values in importance_by_category.items()
-        if sum(values) / len(values) >= 4
-    ]
+        for category, avg in sorted(
+            ((c, sum(v) / len(v)) for c, v in importance_by_category.items()),
+            key=lambda pair: -pair[1],
+        )
+        if avg >= 4
+    ][:4]
     radar_scores = compute_radar_scores(
         selected_categories, st.session_state.questionnaire_importance.keys()
     )

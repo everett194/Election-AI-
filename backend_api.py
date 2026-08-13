@@ -19,10 +19,11 @@ from __future__ import annotations
 
 import os
 import re
+from typing import Annotated
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import answer_storage
 import election_lookup
@@ -233,7 +234,7 @@ class CandidateResultInput(BaseModel):
     name: str
     office: str
     positions: dict[str, int]
-    emphasis: dict[str, int] = {}
+    emphasis: dict[str, Annotated[int, Field(ge=1, le=5)]] = {}
 
 
 class ResultsRequest(BaseModel):

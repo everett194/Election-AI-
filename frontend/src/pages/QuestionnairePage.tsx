@@ -128,7 +128,7 @@ function CategoryStage({ options, ranked, onToggle, onContinue }: {
   )
 }
 
-// ─── Stages 2 & 3: general + personalized policy questions ─────────────────
+// ─── Stage 2: all 20 policy questions, ordered by rank ──────────────────────
 
 function ProgressHeader({ step, total, answeredCount, onEditPriorities }: {
   step: number
@@ -418,7 +418,7 @@ export default function QuestionnairePage() {
               ← Previous
             </button>
 
-            <div className="hidden sm:flex items-center gap-1 overflow-hidden max-w-[160px] flex-wrap">
+            <div className="hidden sm:flex items-center gap-1 overflow-hidden max-w-[260px] flex-wrap">
               {orderedQuestions.map((question, i) => {
                 const isDone = quizAnswers[question.id] !== undefined
                 const isCurr = i === step

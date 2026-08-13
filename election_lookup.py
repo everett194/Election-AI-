@@ -1398,7 +1398,7 @@ def research_candidates_via_tavily(
     Anthropic-call rate-limit issue this project hit with parallel Claude
     calls; see git history).
 
-    The first pass is always the broad, 7-query-per-candidate search above,
+    The first pass is always the broad, 12-query-per-candidate search above,
     covering every category -- this always runs, so research never narrows
     to only a voter's chosen issues. When `selected_categories` is given, a
     second targeted pass follows: for any candidate still missing sourced
