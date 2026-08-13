@@ -1236,6 +1236,18 @@ answer when combined with SOME real evidence about the candidate, but never subs
 entirely. If there is truly no candidate-specific evidence at all connecting them to a question's \
 subject, leave that question out for that candidate.
 
+In addition to positions, for each candidate rate how much they EMPHASIZE each of the 7 policy \
+categories below across all the evidence (their own website, social media, campaign materials, \
+news coverage, and any other source) -- this is about how much they talk about the general \
+subject, not whether they take a clear position on any one question within it. Score each \
+category the evidence supports a judgment on from 1 to 5: 1 = never or almost never mentioned, \
+3 = mentioned occasionally alongside other topics, 5 = a clear, recurring campaign priority they \
+discuss often. Only include a category if the evidence actually reflects something about that \
+candidate discussing it, even loosely -- omit a category entirely for a candidate rather than \
+guessing if the evidence says nothing connecting them to it at all.
+
+Categories: {category_ids}
+
 Race: {office_description} ({jurisdiction_name}, zip code {zipcode})
 
 Evidence found for each candidate:
@@ -1250,8 +1262,9 @@ and 3 means a genuinely mixed/moderate position supported by the evidence.
 
 Respond with ONLY a single JSON object (no markdown fences, no prose before or after) in exactly \
 this shape, with one entry per candidate listed above (using their name exactly as given), \
-including a question only when the evidence meets at least "weak_inference", and citing the \
-specific URL from the evidence above that supports each answer:
+including a question only when the evidence meets at least "weak_inference", citing the specific \
+URL from the evidence above that supports each answer, and including an emphasis entry only for a \
+category the evidence supports a judgment on:
 
 {{
   "candidates": [
@@ -1264,6 +1277,9 @@ specific URL from the evidence above that supports each answer:
           "confidence": "explicit" | "strong_inference" | "weak_inference",
           "source_url": "<one of the URLs from the evidence above>"
         }}
+      ],
+      "emphasis": [
+        {{"category": "<one of the category ids above>", "score": 1 | 2 | 3 | 4 | 5}}
       ]
     }}
   ]
@@ -1314,6 +1330,21 @@ def _parse_evidence_positions(
     return positions_by_id, sourced_positions
 
 
+def _parse_emphasis(emphasis_data: "list") -> "dict[str, int]":
+    emphasis: dict[str, int] = {}
+    for entry in emphasis_data:
+        if not isinstance(entry, dict):
+            continue
+        category = entry.get("category")
+        if not isinstance(category, str) or category not in CATEGORY_LABELS:
+            continue
+        score = entry.get("score")
+        if not isinstance(score, int) or isinstance(score, bool) or not (1 <= score <= 5):
+            continue
+        emphasis[category] = score
+    return emphasis
+
+
 def parse_candidates_evidence_response(
     office: str, candidate_names: "list[str]", raw_text: str
 ) -> "dict[str, CandidateIssueProfile]":
@@ -1338,8 +1369,14 @@ def parse_candidates_evidence_response(
         if not isinstance(positions_data, list):
             continue
         positions_by_id, sourced_positions = _parse_evidence_positions(positions_data)
+        emphasis_data = cand_data.get("emphasis")
+        emphasis = _parse_emphasis(emphasis_data) if isinstance(emphasis_data, list) else {}
         profiles[name] = CandidateIssueProfile(
-            candidate_name=name, office=office, positions=positions_by_id, sourced_positions=sourced_positions
+            candidate_name=name,
+            office=office,
+            positions=positions_by_id,
+            sourced_positions=sourced_positions,
+            emphasis=emphasis,
         )
 
     return profiles
@@ -1409,6 +1446,7 @@ def research_candidates_via_tavily(
         evidence_block=evidence_block,
         question_count=len(QUESTIONS),
         questions_block=_format_questions_block(),
+        category_ids=", ".join(CATEGORY_LABELS),
     )
 
     candidate_names = [candidate.name for candidate in candidates]
@@ -1477,6 +1515,7 @@ def research_candidates_via_tavily(
         evidence_block=gap_evidence_block,
         question_count=len(QUESTIONS),
         questions_block=_format_questions_block(),
+        category_ids=", ".join(CATEGORY_LABELS),
     )
     gap_names = [candidate.name for candidate in gap_candidates]
 
@@ -1509,6 +1548,7 @@ def research_candidates_via_tavily(
             office=office,
             positions=merged_positions,
             sourced_positions=merged_sourced,
+            emphasis=base.emphasis,  # emphasis always comes from the broad pass, never the narrower gap pass
         )
 
     return profiles
@@ -1587,6 +1627,7 @@ def research_candidates_for_race_with_fallback(
             office=office,
             positions=positions,
             sourced_positions=sourced_positions,
+            emphasis=sourced.emphasis if sourced else {},
         )
 
     return merged

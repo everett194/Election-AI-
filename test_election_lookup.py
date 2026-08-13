@@ -849,6 +849,48 @@ def test_parses_candidates_evidence_response():
     assert profiles["John Smith"].sourced_positions[0].confidence == "strong_inference"
 
 
+CANDIDATES_EVIDENCE_WITH_EMPHASIS_JSON = """
+{
+  "candidates": [
+    {
+      "name": "Jane Doe",
+      "positions": [
+        {"question_id": "housing_zoning_density", "position": 4,
+         "confidence": "explicit", "source_url": "https://example.com/jane-vote411"}
+      ],
+      "emphasis": [
+        {"category": "housing", "score": 5},
+        {"category": "taxes", "score": 2}
+      ]
+    }
+  ]
+}
+"""
+
+
+def test_parses_candidates_evidence_response_with_emphasis():
+    profiles = parse_candidates_evidence_response("mayor", ["Jane Doe"], CANDIDATES_EVIDENCE_WITH_EMPHASIS_JSON)
+    assert profiles["Jane Doe"].emphasis == {"housing": 5, "taxes": 2}
+
+
+def test_parses_candidates_evidence_response_missing_emphasis_key_defaults_empty():
+    profiles = parse_candidates_evidence_response("mayor", ["Jane Doe"], CANDIDATES_EVIDENCE_JSON)
+    assert profiles["Jane Doe"].emphasis == {}
+
+
+def test_candidates_evidence_response_skips_invalid_emphasis_entries():
+    raw = (
+        '{"candidates": [{"name": "Jane Doe", "positions": [], "emphasis": ['
+        '{"category": "not_a_real_category", "score": 3}, '
+        '{"category": "housing", "score": 9}, '
+        '{"category": "housing", "score": "high"}, '
+        '{"category": "taxes", "score": 4}'
+        ']}]}'
+    )
+    profiles = parse_candidates_evidence_response("mayor", ["Jane Doe"], raw)
+    assert profiles["Jane Doe"].emphasis == {"taxes": 4}
+
+
 def test_candidates_evidence_response_rejects_old_confidence_taxonomy():
     # "high"/"medium"/"low" (the old race-search taxonomy) must not be
     # silently accepted here -- only the explicit/strong_inference/
@@ -1025,6 +1067,38 @@ def test_fallback_skips_speculation_for_a_fully_sourced_candidate():
     assert fake_client.messages.create.call_count == 1
 
 
+def test_fallback_carries_emphasis_through_to_final_merged_profile():
+    fake_client = MagicMock()
+    evidence_with_emphasis = """
+    {"candidates": [{"name": "Jane Doe", "positions": [
+      {"question_id": "housing_zoning_density", "position": 4, "confidence": "explicit",
+       "source_url": "https://example.com/jane"}
+    ], "emphasis": [{"category": "housing", "score": 5}]}]}
+    """
+
+    def fake_create(*args, **kwargs):
+        content = kwargs["messages"][0]["content"]
+        if "analyzing pre-gathered web search" in content:
+            return _mock_response(evidence_with_emphasis)
+        # speculative fallback fills the remaining questions
+        remaining_json = ",".join(
+            f'{{"question_id": "{q.id}", "position": 3}}'
+            for q in QUESTIONS
+            if q.id != "housing_zoning_density"
+        )
+        return _mock_response(f'{{"candidates": [{{"name": "Jane Doe", "positions": [{remaining_json}]}}]}}')
+
+    fake_client.messages.create.side_effect = fake_create
+    candidates = [Candidate(name="Jane Doe", party="Independent", incumbent=True, positions=[])]
+
+    with patch("election_lookup.tavily_search.search_many", side_effect=_empty_evidence_search_many):
+        profiles = research_candidates_for_race_with_fallback(
+            "62704", "mayor", "Springfield", candidates, client=fake_client
+        )
+
+    assert profiles["Jane Doe"].emphasis == {"housing": 5}
+
+
 # --- Priority-category Tavily research pass ---------------------------------
 
 
@@ -1120,7 +1194,7 @@ def test_research_candidates_via_tavily_adds_priority_pass_for_missing_category(
     # priority pass covering ONLY "safety" -- "housing" was already sourced
     # by the broad pass, so it must not be re-searched.
     assert mock_search_many.call_count == 2
-    assert len(search_calls[0]) == 7
+    assert len(search_calls[0]) == 12
     assert len(search_calls[1]) == 5
     assert not any("housing" in q.lower() for q in search_calls[1])
 
@@ -1161,6 +1235,43 @@ def test_research_candidates_via_tavily_skips_priority_pass_when_fully_covered()
     assert mock_search_many.call_count == 1
     assert fake_client.messages.create.call_count == 1
     assert profiles["Jane Doe"].covered_categories() == {"housing"}
+
+
+def test_research_candidates_via_tavily_keeps_broad_pass_emphasis_through_gap_fill():
+    fake_client = MagicMock()
+    broad_with_emphasis = """
+    {"candidates": [{"name": "Jane Doe", "positions": [
+      {"question_id": "housing_zoning_density", "position": 4, "confidence": "explicit",
+       "source_url": "https://example.com/jane-housing"}
+    ], "emphasis": [{"category": "housing", "score": 4}]}]}
+    """
+    gap_fill_response = """
+    {"candidates": [{"name": "Jane Doe", "positions": [
+      {"question_id": "safety_police_funding", "position": 2, "confidence": "explicit",
+       "source_url": "https://example.com/jane-safety"}
+    ], "emphasis": [{"category": "safety", "score": 1}]}]}
+    """
+    fake_client.messages.create.side_effect = [
+        _mock_response(broad_with_emphasis),
+        _mock_response(gap_fill_response),
+    ]
+    candidates = [Candidate(name="Jane Doe", party=None, incumbent=None, positions=[])]
+
+    with patch(
+        "election_lookup.tavily_search.search_many", side_effect=_fake_search_many_echo
+    ):
+        profiles = research_candidates_via_tavily(
+            "62704",
+            "mayor",
+            "Springfield",
+            candidates,
+            client=fake_client,
+            selected_categories=["housing", "safety"],
+        )
+
+    # Emphasis always comes from the broad pass, even though the gap-fill
+    # pass also returned an (ignored) emphasis entry for "safety".
+    assert profiles["Jane Doe"].emphasis == {"housing": 4}
 
 
 def test_research_candidates_via_tavily_caps_and_dedupes_priority_queries():
