@@ -195,33 +195,33 @@ def test_derive_candidate_weights_two_candidates_get_different_weights_same_ques
 
 
 def test_derive_candidate_weights_blend_moves_overall_compatibility():
-    # End-to-end: two candidates with IDENTICAL positions but different
-    # emphasis on the voter's rank-1 category must produce DIFFERENT overall_pct.
-    answers = {"housing_zoning_density": 5}
-    identical_positions = {"housing_zoning_density": 3}  # same for both candidates
+    # End-to-end: two candidates with IDENTICAL positions on every question but
+    # DIFFERENT emphasis on the voter's rank-1 category must produce DIFFERENT
+    # overall_pct -- proving the emphasis blend actually moves the weighted
+    # average, not just the per-question weight dict in isolation. Housing and
+    # taxes are given different per-question compatibility (0.0 and 1.0) so
+    # that redistributing weight between them changes the blended result; if
+    # they had equal compatibility, weight redistribution wouldn't move the
+    # average at all, which would make this test pass even with a broken/
+    # no-op emphasis implementation.
+    answers = {"housing_zoning_density": 5, "taxes_shortfall": 2}
+    identical_positions = {"housing_zoning_density": 1, "taxes_shortfall": 2}  # same for both candidates
+    # compat: housing = 1 - |5-1|/4 = 0.0; taxes = 1 - |2-2|/4 = 1.0
 
-    weights_high = derive_candidate_weights(["housing"], answers.keys(), {"housing": 5})
-    weights_low = derive_candidate_weights(["housing"], answers.keys(), {"housing": 1})
+    weights_high = derive_candidate_weights(["housing"], answers.keys(), {"housing": 5})  # high housing emphasis
+    weights_low = derive_candidate_weights(["housing"], answers.keys(), {"housing": 1})  # low housing emphasis
 
     result_high = compute_candidate_compatibility(answers, weights_high, identical_positions)
     result_low = compute_candidate_compatibility(answers, weights_low, identical_positions)
 
-    # Weight alone doesn't change a single-question overall_pct (it's the only
-    # question, so weighted average == its own compatibility regardless of
-    # weight) -- so prove the effect with a second, unranked question where
-    # the two candidates diverge in compatibility, and show the weighted
-    # blend differs between them.
-    answers_multi = {"housing_zoning_density": 5, "taxes_shortfall": 2}
-    candidate_a_positions = {"housing_zoning_density": 3, "taxes_shortfall": 2}  # matches on taxes
-    candidate_b_positions = {"housing_zoning_density": 3, "taxes_shortfall": 5}  # mismatches on taxes
-
-    weights_a = derive_candidate_weights(["housing"], answers_multi.keys(), {"housing": 5})  # high housing emphasis
-    weights_b = derive_candidate_weights(["housing"], answers_multi.keys(), {"housing": 1})  # low housing emphasis
-
-    result_a = compute_candidate_compatibility(answers_multi, weights_a, candidate_a_positions)
-    result_b = compute_candidate_compatibility(answers_multi, weights_b, candidate_b_positions)
-
-    assert result_a["overall_pct"] != result_b["overall_pct"]
+    assert result_high["overall_pct"] != result_low["overall_pct"]
+    # High housing emphasis pulls the blend toward housing's 0% compatibility
+    # (weight 6.5 vs baseline 1.0 -> overall = 100 * 1.0/7.5); low housing
+    # emphasis pulls it toward taxes' 100% instead (weight 3.5 vs baseline 1.0
+    # -> overall = 100 * 1.0/4.5) -- explicit numbers guard against a future
+    # regression silently keeping the two results merely "different."
+    assert result_high["overall_pct"] == pytest.approx(100 / 7.5)
+    assert result_low["overall_pct"] == pytest.approx(100 / 4.5)
 
 
 # --- Graduated priority radar (compute_radar_scores) -------------------------
