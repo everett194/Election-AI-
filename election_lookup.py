@@ -72,7 +72,9 @@ class CandidateIssuePosition:
 class CandidateIssueProfile:
     candidate_name: str
     office: Literal["mayor", "county", "us_house"]
-    positions: dict[str, int]  # question_id -> 1-5; feeds compute_candidate_compatibility directly
+    positions: dict[str, int]  # question_id -> 1-5, VERIFIED (sourced) positions only -- feeds
+    # compute_candidate_compatibility directly; a speculative/unverified guess is never in here,
+    # see sourced_positions and research_candidates_for_race_with_fallback
     sourced_positions: list[CandidateIssuePosition] = field(default_factory=list)
     emphasis: dict[str, int] = field(default_factory=dict)  # category -> 1-5 OSINT "how much do they talk about this" score
 
@@ -481,8 +483,8 @@ def _format_questions_block() -> str:
         lines.append(
             f"- id: {question.id}\n"
             f"  question: {question.text}\n"
-            f"  approach 1 (position 1-2): {question.approach_1}\n"
-            f"  approach 2 (position 4-5): {question.approach_2}"
+            f"  position_1 (scale 1-2): {question.position_1}\n"
+            f"  position_2 (scale 4-5): {question.position_2}"
         )
     return "\n".join(lines)
 
@@ -1563,13 +1565,20 @@ def research_candidates_for_race_with_fallback(
     selected_categories: "Iterable[str] | None" = None,
 ) -> "dict[str, CandidateIssueProfile]":
     """Combines real, sourced research (research_candidates_via_tavily) with
-    a speculative fallback (predict_candidates_for_race) so every candidate
-    ends up with a full or near-full profile and actually shows up on the
-    comparison charts, instead of being silently excluded because local-race
-    web coverage is often thin. A sourced answer always wins over a
-    speculative one for the same question; speculative positions are tagged
-    confidence="speculative" with no source, so the UI can (and does) label
-    them as an unverified guess rather than presenting them as fact.
+    a speculative fallback (predict_candidates_for_race) so a candidate's
+    profile page can still show a plausible answer for every question,
+    instead of just going blank, when local-race web coverage is thin. A
+    sourced answer always wins over a speculative one for the same question;
+    speculative positions are tagged confidence="speculative" with no
+    source, so the UI can (and does) label them as an unverified guess
+    rather than presenting them as fact.
+
+    Speculative positions are added only to `sourced_positions` for display,
+    never to `positions` -- `positions` is what feeds
+    compute_candidate_compatibility, compass scores, and every other
+    quantitative score, and a guess with no real evidence behind it must
+    never move a match percentage. A candidate's match score is only ever
+    built from genuinely sourced positions.
 
     Speculation is only requested for candidates whose sourced profile is
     missing at least one of the 20 questions -- a candidate with full real
@@ -1612,7 +1621,12 @@ def research_candidates_for_race_with_fallback(
             for question_id, position_value in speculative.positions.items():
                 if question_id in positions:
                     continue  # real evidence already covers this question -- keep it
-                positions[question_id] = position_value
+                # Deliberately NOT added to `positions` -- a speculative guess has
+                # no real evidence behind it, so it must never factor into
+                # compute_candidate_compatibility, compass scores, or any other
+                # quantitative score. It's only recorded in `sourced_positions`
+                # so the UI can still show it, clearly labeled "Unverified
+                # Estimate," on the candidate's profile page.
                 sourced_positions.append(
                     CandidateIssuePosition(
                         question_id=question_id,

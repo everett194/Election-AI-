@@ -1025,16 +1025,20 @@ def test_fallback_fills_gaps_with_speculation_when_sourced_coverage_is_thin():
         )
 
     profile = profiles["Jane Doe"]
-    # Sourced answer wins for the overlapping question.
-    assert profile.positions["housing_zoning_density"] == 4
-    # Speculative fallback fills the gap.
-    assert profile.positions["taxes_shortfall"] == 3
+    # Sourced answer wins for the overlapping question, and is the only one
+    # that feeds `positions` -- a speculative guess must never factor into
+    # compute_candidate_compatibility or any other quantitative score.
+    assert profile.positions == {"housing_zoning_density": 4}
+    assert "taxes_shortfall" not in profile.positions
 
     by_question = {p.question_id: p for p in profile.sourced_positions}
     assert by_question["housing_zoning_density"].confidence == "explicit"
     assert by_question["housing_zoning_density"].source.url == "https://example.com/jane"
+    # The speculative fallback still shows up in sourced_positions, tagged
+    # as unverified, so the UI can display it -- just not in `positions`.
     assert by_question["taxes_shortfall"].confidence == "speculative"
     assert by_question["taxes_shortfall"].source is None
+    assert by_question["taxes_shortfall"].position == 3
 
     # Two calls total: one evidence-extrapolation call, one speculative call.
     assert fake_client.messages.create.call_count == 2

@@ -183,7 +183,7 @@ export function PolicyScaleBar({
     <div className="space-y-1.5">
       {label && <p className="text-xs text-muted">{label}</p>}
       <div className="flex items-center gap-2.5">
-        <span className="text-[9px] text-muted w-16 text-right shrink-0 uppercase tracking-wide">Approach 1</span>
+        <span className="text-[9px] text-muted w-16 text-right shrink-0 uppercase tracking-wide">Position 1</span>
         <div className="relative flex-1 h-2 bg-soft-mid rounded-full">
           <div
             className="absolute inset-y-0 left-0 bg-civic rounded-full transition-all"
@@ -194,7 +194,7 @@ export function PolicyScaleBar({
             style={{ left: `calc(${pct}% - 7px)` }}
           />
         </div>
-        <span className="text-[9px] text-muted w-16 shrink-0 uppercase tracking-wide">Approach 2</span>
+        <span className="text-[9px] text-muted w-16 shrink-0 uppercase tracking-wide">Position 2</span>
       </div>
     </div>
   )

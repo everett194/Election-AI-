@@ -250,12 +250,12 @@ export default function CandidateProfilePage() {
                   </div>
 
                   <p className="text-sm text-muted leading-relaxed mb-4">{question.text}</p>
-                  <PolicyScaleBar value={sourced.position} label={`${question.approach_1}  vs.  ${question.approach_2}`} />
+                  <PolicyScaleBar value={sourced.position} label={`${question.position_1}  vs.  ${question.position_2}`} />
 
                   {sourced.confidence === 'speculative' && (
                     <div className="mt-3">
                       <Alert type="warning">
-                        <strong>Unverified estimate:</strong> No real evidence was found for this question. This position was estimated by AI and should be verified independently.
+                        <strong>Unverified estimate:</strong> No real evidence was found for this question. This position was estimated by AI, is <strong>not counted in this candidate's match percentage</strong>, and should be verified independently.
                       </Alert>
                     </div>
                   )}

@@ -88,8 +88,8 @@ export interface ApiQuestion {
   econ_weight: number
   social_weight: number
   text: string
-  approach_1: string
-  approach_2: string
+  position_1: string
+  position_2: string
   selection_priority: number
   research_terms: string[]
 }

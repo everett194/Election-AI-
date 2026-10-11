@@ -349,8 +349,8 @@ export default function QuestionnairePage() {
 
           <div className="px-6 sm:px-8 pb-5 space-y-3">
             <div className="grid grid-cols-2 gap-3 text-xs text-muted">
-              <p><span className="font-semibold text-navy">1-2:</span> {q.approach_1}</p>
-              <p className="text-right"><span className="font-semibold text-navy">4-5:</span> {q.approach_2}</p>
+              <p><span className="font-semibold text-navy">1-2:</span> {q.position_1}</p>
+              <p className="text-right"><span className="font-semibold text-navy">4-5:</span> {q.position_2}</p>
             </div>
 
             <p className="text-xs font-medium text-muted-light uppercase tracking-widest pt-2">

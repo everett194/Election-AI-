@@ -103,8 +103,8 @@ def _question_to_dict(question) -> dict:
         "econ_weight": question.econ_weight,
         "social_weight": question.social_weight,
         "text": question.text,
-        "approach_1": question.approach_1,
-        "approach_2": question.approach_2,
+        "position_1": question.position_1,
+        "position_2": question.position_2,
         "selection_priority": question.selection_priority,
         "research_terms": list(question.research_terms),
     }

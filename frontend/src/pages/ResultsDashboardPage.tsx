@@ -283,6 +283,7 @@ export default function ResultsDashboardPage() {
                 <div className="px-5 pb-6 border-t border-border space-y-3 text-sm text-navy/70 leading-relaxed">
                   <p className="pt-4">Match percentages compare your questionnaire answers to candidate positions on the same questions, using only questions where both you and the candidate have an answer. Questions in the issue categories you selected as priorities count more toward your match; every other answered question still counts, just at a lower weight — no category is ever weighted at zero.</p>
                   <p>Questions you answered "Not Sure," skipped, or never saw are excluded. Candidates with zero overlapping answered questions show no percentage rather than a misleading number.</p>
+                  <p>When a candidate's position on a question has no real evidence behind it, their profile may still show an AI-estimated "Unverified Estimate" for reference — but that estimate is <strong>never counted toward their match percentage</strong>. Only positions backed by a real source factor into these scores.</p>
                   <p>Match estimates are <strong>not predictions of future policy</strong> and do not account for positions not yet publicly documented.</p>
                 </div>
               )}

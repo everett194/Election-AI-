@@ -319,8 +319,8 @@ def render_questionnaire(
                 for question in category_questions:
                     st.markdown(f"**{question.text}**")
                     col1, col2 = st.columns(2)
-                    col1.caption(f"1-2: {question.approach_1}")
-                    col2.caption(f"4-5: {question.approach_2}")
+                    col1.caption(f"1-2: {question.position_1}")
+                    col2.caption(f"4-5: {question.position_2}")
                     form_answers[question.id] = st.slider(
                         "Your position",
                         min_value=1,
