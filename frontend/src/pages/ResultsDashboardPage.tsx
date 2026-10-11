@@ -8,6 +8,7 @@ import { ChartCard } from '../components/charts/ChartCard'
 import { CandidateSelector } from '../components/charts/CandidateSelector'
 import { IssueRadarChart } from '../components/charts/IssueRadarChart'
 import { IdeologicalCompassChart, CompassDetailsPanel } from '../components/charts/IdeologicalCompassChart'
+import { VotingPlanCard } from '../components/VotingPlanCard'
 import { useCandidateSelection } from '../hooks/useCandidateSelection'
 import { buildCandidateColorMap } from '../lib/candidateColors'
 import { categoryLabelMap, confidenceBucket, initialsFor } from '../lib/derive'
@@ -117,7 +118,7 @@ function MatchCard({ result, rank, expanded, onToggle, categoryLabels }: {
 
 export default function ResultsDashboardPage() {
   const { navigate } = useNav()
-  const { results, resultsStatus, resultsError, questions, ensureQuestionsLoaded, computeResults } = useAppData()
+  const { elections, results, resultsStatus, resultsError, questions, ensureQuestionsLoaded, computeResults } = useAppData()
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [showMethodology, setShowMethodology] = useState(false)
   const [showCompassMethod, setShowCompassMethod] = useState(false)
@@ -150,6 +151,14 @@ export default function ResultsDashboardPage() {
   }, [results, candidateColorMap])
 
   const selection = useCandidateSelection(chartCandidates)
+
+  const votingPlanInfo = useMemo(() => {
+    const dated = elections.races.filter((r): r is typeof r & { election_date: string } => !!r.election_date)
+    if (dated.length === 0) return { electionDate: null, officeLabels: [] as string[] }
+    const electionDate = dated.reduce((earliest, r) => (r.election_date < earliest ? r.election_date : earliest), dated[0].election_date)
+    const officeLabels = dated.filter((r) => r.election_date === electionDate).map((r) => r.office_label)
+    return { electionDate, officeLabels }
+  }, [elections.races])
 
   if (resultsStatus === 'idle') {
     return (
@@ -224,6 +233,14 @@ export default function ResultsDashboardPage() {
       </div>
 
       <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8">
+        <div className="mb-6">
+          <VotingPlanCard
+            zipcode={elections.zipcode}
+            electionDate={votingPlanInfo.electionDate}
+            officeLabels={votingPlanInfo.officeLabels}
+          />
+        </div>
+
         <Alert type="warning">
           <strong>These results are estimates.</strong> Match percentages are based on available evidence only and may be incomplete where candidate positions are uncertain or not yet documented. The highest match is not an endorsement. Use these results alongside your own independent research.
         </Alert>
